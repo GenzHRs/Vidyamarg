@@ -1,0 +1,804 @@
+/**
+ * Resume Center API Client
+ * Connects frontend to the production Resume Center backend endpoints with cookie/token auth,
+ * CSRF headers, and full type safety.
+ */
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+function getCsrfToken(): string | null {
+  if (typeof document === "undefined") return null;
+  const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function getAuthHeaders(): HeadersInit {
+  const headers: Record<string, string> = {
+    "Accept": "application/json",
+  };
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  const csrf = getCsrfToken();
+  if (csrf) {
+    headers["X-CSRF-Token"] = csrf;
+  }
+  return headers;
+}
+
+export interface PersonalInfo {
+  full_name?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  location?: string;
+  address?: string;
+  linkedin?: string;
+  github?: string;
+  portfolio?: string;
+  custom_links?: Array<{ label: string; url: string } | string>;
+}
+
+export interface WorkExperience {
+  title?: string;
+  role?: string;
+  designation?: string;
+  company?: string;
+  employer?: string;
+  location?: string;
+  employment_location?: string;
+  start_date?: string;
+  end_date?: string;
+  bullets?: string[];
+  responsibilities?: string[];
+}
+
+export interface Project {
+  name?: string;
+  title?: string;
+  technologies?: string;
+  tech_stack?: string;
+  start_date?: string;
+  end_date?: string;
+  link?: string;
+  url?: string;
+  bullets?: string[];
+}
+
+export interface Education {
+  degree?: string;
+  institution?: string;
+  university?: string;
+  location?: string;
+  start_date?: string;
+  end_date?: string;
+  graduation_year?: string;
+  gpa?: string;
+  honors?: string;
+}
+
+export interface Certification {
+  name?: string;
+  issuer?: string;
+  date?: string;
+}
+
+export interface StructuredResumeData {
+  personal_info?: PersonalInfo;
+  summary?: string;
+  professional_summary?: string;
+  career_objective?: string;
+  skills?: Record<string, string[]> | string[];
+  experience?: WorkExperience[];
+  work_experience?: WorkExperience[];
+  projects?: Project[];
+  education?: Education[];
+  certifications?: Array<Certification | string>;
+  custom_sections?: Array<{ title: string; content: string }>;
+}
+
+export interface ComprehensiveExtractedProfile {
+  personal_info?: {
+    full_name?: string | null;
+    first_name?: string | null;
+    middle_name?: string | null;
+    last_name?: string | null;
+    professional_title?: string | null;
+    email?: string | null;
+    additional_emails?: string[];
+    phone?: string | null;
+    additional_phones?: string[];
+    location?: string | null;
+    city?: string | null;
+    state?: string | null;
+    country?: string | null;
+    linkedin_url?: string | null;
+    github_url?: string | null;
+    portfolio_url?: string | null;
+    custom_links?: Array<{ label: string; url: string }>;
+  };
+  professional_summary?: {
+    summary?: string | null;
+    career_objective?: string | null;
+    years_of_experience?: number | null;
+    areas_of_specialization?: string[];
+    career_interests?: string[];
+  };
+  skills?: {
+    programming_languages?: string[];
+    frameworks_libraries?: string[];
+    databases?: string[];
+    cloud_platforms?: string[];
+    developer_tools?: string[];
+    ai_ml_technologies?: string[];
+    soft_skills?: string[];
+    domain_knowledge?: string[];
+    other_skills?: string[];
+    all_raw_skills?: string[];
+  };
+  work_experience?: Array<{
+    employer?: string;
+    company?: string;
+    designation?: string;
+    role?: string;
+    title?: string;
+    job_title?: string;
+    employment_location?: string | null;
+    start_date?: string | null;
+    end_date?: string | null;
+    is_current?: boolean;
+    employment_type?: string | null;
+    responsibilities?: string[];
+    achievements?: string[];
+    technologies?: string[];
+    metrics?: string[];
+    original_text?: string | null;
+  }>;
+  education?: Array<{
+    degree?: string;
+    field_of_study?: string | null;
+    institution?: string;
+    location?: string | null;
+    start_date?: string | null;
+    end_date?: string | null;
+    graduation_year?: string | null;
+    grade?: string | null;
+    relevant_coursework?: string[];
+    achievements?: string[];
+    thesis?: string | null;
+  }>;
+  projects?: Array<{
+    name?: string;
+    description?: string | null;
+    problem?: string | null;
+    solution?: string | null;
+    technologies?: string[];
+    responsibilities?: string[];
+    features?: string[];
+    results_metrics?: string[];
+    duration?: string | null;
+    link?: string | null;
+    project_type?: string | null;
+  }>;
+  certifications?: Array<{
+    name?: string;
+    issuing_organization?: string | null;
+    issue_date?: string | null;
+    expiration_date?: string | null;
+    credential_id?: string | null;
+    credential_url?: string | null;
+    training_type?: string | null;
+  }>;
+  achievements?: string[];
+  publications?: Array<{
+    title?: string;
+    publisher?: string | null;
+    date?: string | null;
+    url?: string | null;
+  }>;
+  languages?: Array<{
+    language?: string;
+    proficiency?: string | null;
+  }>;
+  custom_sections?: Array<{
+    section_title?: string;
+    original_content?: string;
+    structured_content?: any;
+  }>;
+  confidence_score?: number;
+  missing_fields?: string[];
+  extraction_warnings?: string[];
+}
+
+export interface ResumeTemplateItem {
+  id: number;
+  name: string;
+  slug: string;
+  description: string;
+  category: string;
+  ats_score: number;
+  license_name: string;
+  license_url?: string;
+  preview_image?: string;
+  is_active: boolean;
+  latex_template?: string;
+}
+
+export interface ResumeItem {
+  id: number;
+  title: string;
+  source_type: string;
+  template_id?: number;
+  template_name?: string;
+  template_slug?: string;
+  current_version_id?: number;
+  version_number: number;
+  original_file_url?: string;
+  latest_pdf_url?: string;
+  latest_tex_url?: string;
+  status: string;
+  created_at?: string;
+  updated_at?: string;
+  structured_data?: StructuredResumeData;
+  change_summary?: string;
+}
+
+export interface ResumeVersionItem {
+  id: number;
+  version_number: number;
+  change_summary?: string;
+  created_at?: string;
+  is_current: boolean;
+  pdf_file_url?: string;
+  structured_data: StructuredResumeData;
+}
+
+export interface SuggestedChange {
+  section: string;
+  original: string;
+  proposed: string;
+  reason: string;
+  requires_confirmation: boolean;
+}
+
+export interface TailoredResumeOutput {
+  job_title: string;
+  company: string;
+  required_skills: string[];
+  preferred_skills: string[];
+  responsibilities: string[];
+  matching_skills: string[];
+  missing_requirements: string[];
+  transferable_skills: string[];
+  suggested_changes: SuggestedChange[];
+  final_resume_data: StructuredResumeData;
+  ats_keywords: string[];
+  warnings: string[];
+}
+
+export interface SourceResumeForTailoring {
+  resume_id: number;
+  title: string;
+  template_id?: number;
+  structured_data: StructuredResumeData;
+  raw_text_length: number;
+  source_type: string;
+}
+
+export interface RenderTailoredTemplateResponse {
+  template_id: number;
+  template_name: string;
+  template_slug: string;
+  latex_source: string;
+  preview_url: string;
+  compiled_success: boolean;
+}
+
+export interface SaveTailoredResumeResponse {
+  message: string;
+  resume_id: number;
+  version_id: number;
+  title: string;
+  template_id: number;
+  template_name: string;
+  latest_pdf_url?: string;
+  source_resume_id: number;
+}
+
+class ResumeCenterApiService {
+  // ── TEMPLATES ─────────────────────────────────────────────────────────────
+  async getTemplates(): Promise<ResumeTemplateItem[]> {
+    try {
+      const res = await fetch(`${API_BASE_URL}/resume-templates`, {
+        headers: getAuthHeaders(),
+        credentials: "include",
+      });
+      if (!res.ok) return [];
+      return res.json();
+    } catch (err) {
+      console.warn("getTemplates fetch warning:", err);
+      return [];
+    }
+  }
+
+  async getTemplate(id: number): Promise<ResumeTemplateItem> {
+    const res = await fetch(`${API_BASE_URL}/resume-templates/${id}`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Failed to load resume template details");
+    return res.json();
+  }
+
+  // ── RESUMES CRUD ──────────────────────────────────────────────────────────
+  async getResumes(search?: string, statusFilter?: string): Promise<ResumeItem[]> {
+    try {
+      const headers = getAuthHeaders() as Record<string, string>;
+      if (!headers["Authorization"]) {
+        return [];
+      }
+      const params = new URLSearchParams();
+      if (search) params.set("search", search);
+      if (statusFilter) params.set("status_filter", statusFilter);
+      const qs = params.toString() ? `?${params.toString()}` : "";
+
+      const res = await fetch(`${API_BASE_URL}/resumes${qs}`, {
+        headers,
+        credentials: "include",
+      });
+      if (!res.ok) {
+        if (res.status === 401 && typeof window !== "undefined") {
+          localStorage.removeItem("token");
+          window.location.href = "/auth/login";
+        }
+        return [];
+      }
+      return res.json();
+    } catch (err) {
+      console.warn("getResumes fetch warning:", err);
+      return [];
+    }
+  }
+
+  async getResume(id: number): Promise<ResumeItem> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${id}`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Failed to load resume");
+    return res.json();
+  }
+
+  async createResume(data: {
+    title: string;
+    template_id?: number;
+    structured_data: StructuredResumeData;
+  }): Promise<ResumeItem> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resumes`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to create resume");
+    }
+    return res.json();
+  }
+
+  async updateResume(
+    id: number,
+    data: {
+      title?: string;
+      template_id?: number;
+      status?: string;
+      structured_data?: StructuredResumeData;
+      change_summary?: string;
+      create_new_version?: boolean;
+    }
+  ): Promise<ResumeItem> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resumes/${id}`, {
+      method: "PATCH",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to update resume");
+    }
+    return res.json();
+  }
+
+  async deleteResume(id: number): Promise<{ message: string; id: number }> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${id}`, {
+      method: "DELETE",
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Failed to delete resume");
+    return res.json();
+  }
+
+  // ── UPLOAD & EXTRACTION ──────────────────────────────────────────────────
+  async uploadResume(
+    file: File,
+    title?: string,
+    templateId?: number
+  ): Promise<{
+    message: string;
+    resume_id: number;
+    version_id: number;
+    title: string;
+    file_name?: string;
+    file_size?: number;
+    file_hash?: string;
+    page_count?: number;
+    original_file_url: string;
+    extraction_status: string;
+    confidence_score: number;
+    missing_fields: string[];
+    warnings: string[];
+    is_duplicate?: boolean;
+    structured_data: ComprehensiveExtractedProfile;
+    template_compatible_data?: StructuredResumeData;
+    raw_text_preview?: string;
+    layout_info?: any;
+  }> {
+    const formData = new FormData();
+    formData.append("file", file);
+    if (title) formData.append("title", title);
+    if (templateId) formData.append("template_id", templateId.toString());
+
+    const headers: Record<string, string> = {};
+    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const csrf = getCsrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+
+    const res = await fetch(`${API_BASE_URL}/resumes/upload`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Upload failed");
+    }
+    return res.json();
+  }
+
+  async getExtraction(resumeId: number): Promise<{
+    resume_id: number;
+    title: string;
+    file_name?: string;
+    file_type?: string;
+    file_size?: number;
+    page_count?: number;
+    file_hash?: string;
+    original_file_url?: string;
+    extraction_status: string;
+    extraction_confidence?: number;
+    is_verified: boolean;
+    raw_text: string;
+    layout_info?: any;
+    confidence_score: number;
+    missing_fields: string[];
+    warnings: string[];
+    structured_data: ComprehensiveExtractedProfile;
+    normalized?: any;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/extraction`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Failed to load resume extraction");
+    return res.json();
+  }
+
+  async verifyExtraction(
+    resumeId: number,
+    payload: { structured_data: ComprehensiveExtractedProfile; raw_text?: string }
+  ): Promise<{
+    message: string;
+    resume_id: number;
+    is_verified: boolean;
+    extraction_status: string;
+    structured_data: ComprehensiveExtractedProfile;
+  }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/extraction/verify`, {
+      method: "PUT",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Verification failed");
+    }
+    return res.json();
+  }
+
+  async getCandidateProfileData(): Promise<{
+    has_profile: boolean;
+    resume_id?: number;
+    resume_title?: string;
+    is_verified?: boolean;
+    profile_data?: ComprehensiveExtractedProfile;
+    template_compatible_data?: StructuredResumeData;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/candidate/profile-data`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Failed to load candidate profile");
+    return res.json();
+  }
+
+  // ── VERSIONS ──────────────────────────────────────────────────────────────
+  async getVersions(resumeId: number): Promise<ResumeVersionItem[]> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/versions`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Failed to load version history");
+    return res.json();
+  }
+
+  async createVersion(
+    resumeId: number,
+    data: { structured_data: StructuredResumeData; change_summary?: string }
+  ): Promise<{ message: string; version_id: number; version_number: number }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/versions`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to save new version");
+    return res.json();
+  }
+
+  async restoreVersion(
+    resumeId: number,
+    versionId: number
+  ): Promise<{ message: string; new_version_id: number; new_version_number: number }> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/versions/${versionId}/restore`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Failed to restore version");
+    return res.json();
+  }
+
+  // ── COMPILATION & DOWNLOAD ────────────────────────────────────────────────
+  async compileResume(resumeId: number): Promise<{
+    status: string;
+    latex_available: boolean;
+    message: string;
+    latest_pdf_url?: string;
+    latest_tex_url?: string;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/compile`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Compilation failed");
+    }
+    return res.json();
+  }
+
+  async downloadPdfBlob(resumeId: number): Promise<Blob> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/download/pdf`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "PDF download failed. Please compile the resume first.");
+    }
+    return res.blob();
+  }
+
+  async downloadLatexText(resumeId: number): Promise<string> {
+    const res = await fetch(`${API_BASE_URL}/resumes/${resumeId}/download/latex`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("LaTeX download failed");
+    return res.text();
+  }
+
+  // ── JD TAILORING ──────────────────────────────────────────────────────────
+  async analyzeJd(data: {
+    job_title: string;
+    company: string;
+    job_description: string;
+    resume_id?: number;
+  }): Promise<TailoredResumeOutput> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resume-tailoring/analyze-jd`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "JD analysis failed");
+    }
+    return res.json();
+  }
+
+  async generateTailoredResume(data: {
+    resume_id: number;
+    job_title: string;
+    company: string;
+    job_description: string;
+    location?: string;
+    seniority?: string;
+    template_id?: number;
+  }): Promise<{
+    analysis: TailoredResumeOutput;
+    original_resume: StructuredResumeData;
+    proposed_resume: StructuredResumeData;
+    suggested_changes: SuggestedChange[];
+    warnings: string[];
+  }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resume-tailoring/generate`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Tailoring generation failed");
+    }
+    return res.json();
+  }
+
+  async approveTailoring(
+    resumeId: number,
+    data: {
+      approved_resume_data: StructuredResumeData;
+      change_summary?: string;
+      create_new_resume?: boolean;
+      new_title?: string;
+    }
+  ): Promise<{ message: string; resume_id: number; version_id: number; title: string }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resume-tailoring/${resumeId}/approve`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Approval failed");
+    }
+    return res.json();
+  }
+
+  async getSourceResumeForTailoring(resumeId: number): Promise<SourceResumeForTailoring> {
+    const res = await fetch(`${API_BASE_URL}/resume-tailoring/source/${resumeId}`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to load source resume data for tailoring");
+    }
+    return res.json();
+  }
+
+  async renderTailoredTemplate(data: {
+    source_resume_id: number;
+    selected_template_id: number;
+    tailored_resume_data: StructuredResumeData;
+  }): Promise<RenderTailoredTemplateResponse> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resume-tailoring/render-template`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to render template preview");
+    }
+    return res.json();
+  }
+
+  getTailoredPreviewUrl(sourceResumeId: number, templateId: number): string {
+    return `${API_BASE_URL}/resume-tailoring/preview/${sourceResumeId}/${templateId}`;
+  }
+
+  async fetchTailoredPreviewBlob(sourceResumeId: number, templateId: number): Promise<Blob> {
+    const res = await fetch(`${API_BASE_URL}/resume-tailoring/preview/${sourceResumeId}/${templateId}`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Could not load preview PDF");
+    return res.blob();
+  }
+
+  async saveTailoredResume(data: {
+    source_resume_id: number;
+    selected_template_id: number;
+    tailored_resume_data: StructuredResumeData;
+    job_title: string;
+    company_name: string;
+    job_description: string;
+    custom_title?: string;
+  }): Promise<SaveTailoredResumeResponse> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resume-tailoring/save`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to save tailored resume");
+    }
+    return res.json();
+  }
+
+  // ── AI ASSISTANCE ──────────────────────────────────────────────────────────
+  async aiEnhanceSection(data: {
+    section: "summary" | "experience_bullet" | "project_description";
+    text: string;
+    context?: string;
+  }): Promise<{ section: string; original: string; enhanced: string }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resumes/ai-enhance`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "AI enhancement failed");
+    }
+    return res.json();
+  }
+}
+
+export const resumeCenterApi = new ResumeCenterApiService();

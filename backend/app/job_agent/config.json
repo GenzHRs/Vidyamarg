@@ -1,0 +1,26 @@
+{
+  "keywords": [
+    "hiring",
+    "job opening",
+    "job opportunity",
+    "we're looking for",
+    "we are looking for",
+    "apply now",
+    "vacancy",
+    "vacancies",
+    "job alert",
+    "job vacancy",
+    "job description",
+    "jd:",
+    "urgent hiring",
+    "walk-in",
+    "walkin interview",
+    "career opportunity",
+    "role:",
+    "position:"
+  ],
+  "history_limit": 300,
+  "postgres": {
+    "table_name": "jobs"
+  }
+}

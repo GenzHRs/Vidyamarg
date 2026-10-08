@@ -1,0 +1,681 @@
+"""
+Secure LaTeX Generation and Compilation Service.
+
+Guarantees:
+- Strict character escaping against LaTeX macro injection
+- Disabled shell-escape (-no-shell-escape)
+- Temporary sandboxed compilation with resource timeouts
+- Path masking in compile errors
+- Graceful degradation when pdflatex is not installed
+"""
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from typing import Dict, Any, Optional, Tuple, List
+
+# Maximum allowed LaTeX source size (1MB)
+MAX_LATEX_SOURCE_SIZE = 1 * 1024 * 1024
+# Maximum allowed compiled PDF size (20MB)
+MAX_PDF_SIZE = 20 * 1024 * 1024
+# Compilation timeout in seconds
+COMPILATION_TIMEOUT_SECONDS = 15
+
+
+_LATEX_MAP = {
+    "\\": r"\textbackslash{}",
+    "&": r"\&",
+    "%": r"\%",
+    "$": r"\$",
+    "#": r"\#",
+    "_": r"\_",
+    "{": r"\{",
+    "}": r"\}",
+    "~": r"\textasciitilde{}",
+    "^": r"\textasciicircum{}",
+    "<": r"$<$",
+    ">": r"$>$",
+}
+_LATEX_PATTERN = re.compile(r"([\\&%$#_{}~^<>])")
+
+
+def escape_latex(text: Any) -> str:
+    """
+    Escapes all LaTeX special characters in user text to prevent command injection
+    or compilation syntax failures using a single-pass regex substitution.
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+
+    # Strip control characters except newline and tab
+    text = "".join(ch for ch in text if ord(ch) >= 32 or ch in "\n\t")
+    return _LATEX_PATTERN.sub(lambda m: _LATEX_MAP[m.group(1)], text)
+
+
+def is_latex_installed() -> bool:
+    """Returns True if pdflatex executable is found on system PATH."""
+    return shutil.which("pdflatex") is not None
+
+
+def render_resume_to_latex(data: Dict[str, Any], template_latex: str) -> str:
+    """
+    Renders structured resume JSON data into a valid Overleaf-compatible LaTeX document.
+    All dynamic values are escaped via escape_latex.
+    """
+    rendered = template_latex
+
+    # 1. Personal Information
+    personal = data.get("personal_info", {})
+    full_name = escape_latex(personal.get("full_name", personal.get("name", "Candidate Name")))
+    email = escape_latex(personal.get("email", ""))
+    phone = escape_latex(personal.get("phone", ""))
+    location = escape_latex(personal.get("location", personal.get("address", "")))
+
+    # Links
+    links_list = []
+    if personal.get("linkedin"):
+        links_list.append(r"\href{" + escape_latex(personal["linkedin"]) + "}{LinkedIn}")
+    if personal.get("github"):
+        links_list.append(r"\href{" + escape_latex(personal["github"]) + "}{GitHub}")
+    if personal.get("portfolio"):
+        links_list.append(r"\href{" + escape_latex(personal["portfolio"]) + "}{Portfolio}")
+    for custom_link in personal.get("custom_links", []):
+        if isinstance(custom_link, dict):
+            links_list.append(r"\href{" + escape_latex(custom_link.get("url", "")) + "}{" + escape_latex(custom_link.get("label", "Link")) + "}")
+        elif isinstance(custom_link, str):
+            links_list.append(escape_latex(custom_link))
+
+    links_str = " $\\mid$ ".join(links_list) if links_list else ""
+
+    rendered = rendered.replace("<VAR:FULL_NAME>", full_name)
+    rendered = rendered.replace("<VAR:EMAIL>", email)
+    rendered = rendered.replace("<VAR:PHONE>", phone)
+    rendered = rendered.replace("<VAR:LOCATION>", location)
+    rendered = rendered.replace("<VAR:LINKS>", links_str)
+
+    # 2. Summary Block
+    summary_text = data.get("summary") or data.get("professional_summary") or data.get("career_objective", "")
+    summary_pattern = re.compile(r"<BLOCK:SUMMARY>(.*?)</BLOCK:SUMMARY>", re.DOTALL)
+    if summary_text:
+        rendered = summary_pattern.sub(
+            lambda m: m.group(1).replace("<VAR:SUMMARY_TEXT>", escape_latex(summary_text)),
+            rendered
+        )
+    else:
+        rendered = summary_pattern.sub("", rendered)
+
+    # 3. Skills Loop
+    skills_data = data.get("skills", {})
+    skills_pattern = re.compile(r"<BLOCK:SKILLS>(.*?)</BLOCK:SKILLS>", re.DOTALL)
+    if skills_data:
+        # Handle dict categories or flat list
+        categories: List[Tuple[str, str]] = []
+        if isinstance(skills_data, dict):
+            for cat_name, items in skills_data.items():
+                if isinstance(items, list):
+                    items_str = ", ".join([escape_latex(x) for x in items])
+                else:
+                    items_str = escape_latex(str(items))
+                categories.append((escape_latex(cat_name), items_str))
+        elif isinstance(skills_data, list):
+            items_str = ", ".join([escape_latex(x) for x in skills_data])
+            categories.append(("Technical Skills", items_str))
+
+        def replace_skills(match):
+            block_content = match.group(1)
+            loop_pattern = re.compile(r"<LOOP:SKILLS_CATEGORIES>(.*?)</LOOP:SKILLS_CATEGORIES>", re.DOTALL)
+            loop_match = loop_pattern.search(block_content)
+            if not loop_match:
+                return block_content
+            loop_template = loop_match.group(1)
+            expanded_items = []
+            for cat_name, items_str in categories:
+                item_rendered = loop_template.replace("<VAR:CATEGORY_NAME>", cat_name).replace("<VAR:CATEGORY_ITEMS>", items_str)
+                expanded_items.append(item_rendered)
+            return loop_pattern.sub(lambda _: "".join(expanded_items), block_content)
+
+        rendered = skills_pattern.sub(replace_skills, rendered)
+    else:
+        rendered = skills_pattern.sub("", rendered)
+
+    # 4. Work Experience Loop
+    experience_list = data.get("experience", data.get("work_experience", []))
+    exp_pattern = re.compile(r"<BLOCK:EXPERIENCE>(.*?)</BLOCK:EXPERIENCE>", re.DOTALL)
+    if experience_list:
+        def replace_experience(match):
+            block_content = match.group(1)
+            loop_pattern = re.compile(r"<LOOP:EXPERIENCE>(.*?)</LOOP:EXPERIENCE>", re.DOTALL)
+            loop_match = loop_pattern.search(block_content)
+            if not loop_match:
+                return block_content
+            loop_template = loop_match.group(1)
+            expanded_entries = []
+            for job in experience_list:
+                job_rendered = loop_template
+                job_rendered = job_rendered.replace("<VAR:JOB_TITLE>", escape_latex(job.get("title", job.get("role", ""))))
+                job_rendered = job_rendered.replace("<VAR:JOB_COMPANY>", escape_latex(job.get("company", "")))
+                job_rendered = job_rendered.replace("<VAR:JOB_LOCATION>", escape_latex(job.get("location", "")))
+                dates = f"{job.get('start_date', '')} -- {job.get('end_date', 'Present')}".strip(" -")
+                job_rendered = job_rendered.replace("<VAR:JOB_DATES>", escape_latex(dates))
+
+                # Bullets inside job
+                bullets_pattern = re.compile(r"<LOOP:JOB_BULLETS>(.*?)</LOOP:JOB_BULLETS>", re.DOTALL)
+                bullets = job.get("bullets", job.get("responsibilities", job.get("highlights", [])))
+                if isinstance(bullets, str):
+                    bullets = [b.strip() for b in bullets.split("\n") if b.strip()]
+                if bullets:
+                    b_match = bullets_pattern.search(job_rendered)
+                    if b_match:
+                        b_template = b_match.group(1)
+                        bullets_expanded = "".join(b_template.replace("<VAR:BULLET_TEXT>", escape_latex(b)) for b in bullets)
+                        job_rendered = bullets_pattern.sub(lambda _: bullets_expanded, job_rendered)
+                else:
+                    job_rendered = bullets_pattern.sub("", job_rendered)
+
+                expanded_entries.append(job_rendered)
+            return loop_pattern.sub(lambda _: "".join(expanded_entries), block_content)
+
+        rendered = exp_pattern.sub(replace_experience, rendered)
+    else:
+        rendered = exp_pattern.sub("", rendered)
+
+    # 5. Projects Loop
+    projects_list = data.get("projects", [])
+    proj_pattern = re.compile(r"<BLOCK:PROJECTS>(.*?)</BLOCK:PROJECTS>", re.DOTALL)
+    if projects_list:
+        def replace_projects(match):
+            block_content = match.group(1)
+            loop_pattern = re.compile(r"<LOOP:PROJECTS>(.*?)</LOOP:PROJECTS>", re.DOTALL)
+            loop_match = loop_pattern.search(block_content)
+            if not loop_match:
+                return block_content
+            loop_template = loop_match.group(1)
+            expanded = []
+            for proj in projects_list:
+                p_rendered = loop_template
+                p_rendered = p_rendered.replace("<VAR:PROJECT_NAME>", escape_latex(proj.get("name", proj.get("title", ""))))
+                p_rendered = p_rendered.replace("<VAR:PROJECT_TECH>", escape_latex(proj.get("technologies", proj.get("tech_stack", ""))))
+                dates = f"{proj.get('start_date', '')} {proj.get('end_date', '')}".strip()
+                p_rendered = p_rendered.replace("<VAR:PROJECT_DATES>", escape_latex(dates))
+                link_text = ""
+                if proj.get("link") or proj.get("url"):
+                    link_text = r"\href{" + escape_latex(proj.get("link") or proj.get("url")) + r"}{\small\texttt{Link}}"
+                p_rendered = p_rendered.replace("<VAR:PROJECT_LINK>", link_text)
+
+                bullets_pattern = re.compile(r"<LOOP:PROJECT_BULLETS>(.*?)</LOOP:PROJECT_BULLETS>", re.DOTALL)
+                bullets = proj.get("bullets", proj.get("description", []))
+                if isinstance(bullets, str):
+                    bullets = [b.strip() for b in bullets.split("\n") if b.strip()]
+                if bullets:
+                    b_match = bullets_pattern.search(p_rendered)
+                    if b_match:
+                        b_template = b_match.group(1)
+                        bullets_expanded = "".join(b_template.replace("<VAR:BULLET_TEXT>", escape_latex(b)) for b in bullets)
+                        p_rendered = bullets_pattern.sub(lambda _: bullets_expanded, p_rendered)
+                else:
+                    p_rendered = bullets_pattern.sub("", p_rendered)
+                expanded.append(p_rendered)
+            return loop_pattern.sub(lambda _: "".join(expanded), block_content)
+
+        rendered = proj_pattern.sub(replace_projects, rendered)
+    else:
+        rendered = proj_pattern.sub("", rendered)
+
+    # 6. Education Loop
+    education_list = data.get("education", [])
+    edu_pattern = re.compile(r"<BLOCK:EDUCATION>(.*?)</BLOCK:EDUCATION>", re.DOTALL)
+    if education_list:
+        def replace_education(match):
+            block_content = match.group(1)
+            loop_pattern = re.compile(r"<LOOP:EDUCATION>(.*?)</LOOP:EDUCATION>", re.DOTALL)
+            loop_match = loop_pattern.search(block_content)
+            if not loop_match:
+                return block_content
+            loop_template = loop_match.group(1)
+            expanded = []
+            for edu in education_list:
+                e_rendered = loop_template
+                e_rendered = e_rendered.replace("<VAR:DEGREE>", escape_latex(edu.get("degree", "")))
+                e_rendered = e_rendered.replace("<VAR:INSTITUTION>", escape_latex(edu.get("institution", edu.get("university", ""))))
+                e_rendered = e_rendered.replace("<VAR:EDU_LOCATION>", escape_latex(edu.get("location", "")))
+                dates = f"{edu.get('start_date', '')} -- {edu.get('end_date', edu.get('graduation_year', ''))}".strip(" -")
+                e_rendered = e_rendered.replace("<VAR:EDU_DATES>", escape_latex(dates))
+                details = []
+                if edu.get("gpa"):
+                    details.append(f"GPA: {escape_latex(edu['gpa'])}")
+                if edu.get("honors"):
+                    details.append(escape_latex(edu["honors"]))
+                e_rendered = e_rendered.replace("<VAR:EDU_DETAILS>", " $\\cdot$ ".join(details))
+                expanded.append(e_rendered)
+            return loop_pattern.sub(lambda _: "".join(expanded), block_content)
+
+        rendered = edu_pattern.sub(replace_education, rendered)
+    else:
+        rendered = edu_pattern.sub("", rendered)
+
+    # 7. Certifications Loop
+    certs_list = data.get("certifications", [])
+    cert_pattern = re.compile(r"<BLOCK:CERTIFICATIONS>(.*?)</BLOCK:CERTIFICATIONS>", re.DOTALL)
+    if certs_list:
+        def replace_certs(match):
+            block_content = match.group(1)
+            loop_pattern = re.compile(r"<LOOP:CERTIFICATIONS>(.*?)</LOOP:CERTIFICATIONS>", re.DOTALL)
+            loop_match = loop_pattern.search(block_content)
+            if not loop_match:
+                return block_content
+            loop_template = loop_match.group(1)
+            expanded = []
+            for cert in certs_list:
+                c_rendered = loop_template
+                if isinstance(cert, str):
+                    c_rendered = c_rendered.replace("<VAR:CERT_NAME>", escape_latex(cert))
+                    c_rendered = c_rendered.replace("<VAR:CERT_ISSUER>", "")
+                    c_rendered = c_rendered.replace("<VAR:CERT_DATE>", "")
+                elif isinstance(cert, dict):
+                    c_rendered = c_rendered.replace("<VAR:CERT_NAME>", escape_latex(cert.get("name", "")))
+                    c_rendered = c_rendered.replace("<VAR:CERT_ISSUER>", escape_latex(cert.get("issuer", "")))
+                    c_rendered = c_rendered.replace("<VAR:CERT_DATE>", escape_latex(cert.get("date", "")))
+                expanded.append(c_rendered)
+            return loop_pattern.sub(lambda _: "".join(expanded), block_content)
+
+        rendered = cert_pattern.sub(replace_certs, rendered)
+    else:
+        rendered = cert_pattern.sub("", rendered)
+
+    # Clean up any leftover placeholder markers
+    rendered = re.sub(r"<VAR:[A-Z_]+>", "", rendered)
+    rendered = re.sub(r"</?BLOCK:[A-Z_]+>", "", rendered)
+    rendered = re.sub(r"</?LOOP:[A-Z_]+>", "", rendered)
+
+    return rendered
+
+
+def compile_latex_to_pdf(
+    latex_source: str,
+    timeout: int = COMPILATION_TIMEOUT_SECONDS
+) -> Tuple[bool, Optional[bytes], Optional[str]]:
+    """
+    Compiles LaTeX source to PDF safely.
+    - Limits source size to MAX_LATEX_SOURCE_SIZE.
+    - Runs in a clean temporary directory with -no-shell-escape.
+    - Hides internal filesystem paths from errors.
+    - If pdflatex is not installed, returns (False, None, error_message).
+    """
+    if len(latex_source.encode("utf-8")) > MAX_LATEX_SOURCE_SIZE:
+        return False, None, "LaTeX source exceeds the 1MB safety size limit"
+
+    if not is_latex_installed():
+        return False, None, (
+            "LaTeX compilation engine (pdflatex) is not installed on this server. "
+            "You can download the generated Overleaf-compatible .tex source file directly "
+            "to compile in Overleaf or configure TeX Live."
+        )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        tex_path = os.path.join(temp_dir, "resume.tex")
+        pdf_path = os.path.join(temp_dir, "resume.pdf")
+
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(latex_source)
+
+        cmd = [
+            "pdflatex",
+            "-no-shell-escape",
+            "-interaction=nonstopmode",
+            "-halt-on-error",
+            "resume.tex"
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=temp_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                text=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+
+            if os.path.exists(pdf_path):
+                file_size = os.path.getsize(pdf_path)
+                if file_size > MAX_PDF_SIZE:
+                    return False, None, "Generated PDF exceeds the maximum size limit of 20MB"
+                with open(pdf_path, "rb") as pf:
+                    pdf_bytes = pf.read()
+                return True, pdf_bytes, None
+
+            # Compilation failed — sanitize error output by removing temp directory path
+            output = result.stdout or result.stderr or "LaTeX compilation error occurred."
+            sanitized_output = output.replace(temp_dir, "/sandbox")
+            # Grab relevant error lines
+            error_lines = [
+                line for line in sanitized_output.split("\n")
+                if line.startswith("!") or "error" in line.lower() or "fatal" in line.lower()
+            ]
+            summary_err = "\n".join(error_lines[:5]) if error_lines else "LaTeX syntax or package compilation failure."
+            return False, None, summary_err
+
+        except subprocess.TimeoutExpired:
+            return False, None, f"LaTeX compilation timed out after {timeout} seconds"
+        except Exception as exc:
+            return False, None, f"LaTeX compilation process failure: {str(exc)}"
+
+
+def render_structured_data_to_pdf(data: Dict[str, Any], title: str = "", template_slug: str = "ats-classic") -> bytes:
+    """
+    Renders structured resume JSON data into an authentic, template-matching PDF
+    using ReportLab when a local pdflatex binary is not present on the host OS.
+    Preserves the selected template's font, colors, headers, margins, and section styling.
+    """
+    import io
+    import html
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, HRFlowable, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+
+    slug = template_slug.lower() if template_slug else "ats-classic"
+
+    # Style Presets per template family for all 15 distinct designs
+    if slug == "classic-ats" or slug == "ats-classic":
+        font_main, font_bold, font_italic = "Times-Roman", "Times-Bold", "Times-Italic"
+        primary_color = colors.HexColor("#000000")
+        accent_color = colors.HexColor("#334155")
+        align_title = 1 # Center
+        margin = 32
+    elif slug == "academic-cv":
+        font_main, font_bold, font_italic = "Times-Roman", "Times-Bold", "Times-Italic"
+        primary_color = colors.HexColor("#111827")
+        accent_color = colors.HexColor("#475569")
+        align_title = 1
+        margin = 36
+    elif slug == "executive-resume":
+        font_main, font_bold, font_italic = "Times-Roman", "Times-Bold", "Times-Italic"
+        primary_color = colors.HexColor("#14234b")
+        accent_color = colors.HexColor("#1e3a8a")
+        align_title = 1
+        margin = 34
+    elif slug == "graduate-fresher":
+        font_main, font_bold, font_italic = "Times-Roman", "Times-Bold", "Times-Italic"
+        primary_color = colors.HexColor("#0f172a")
+        accent_color = colors.HexColor("#2563eb")
+        align_title = 1
+        margin = 32
+    elif slug == "modern-corporate":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#1e40af") # Corporate Navy
+        accent_color = colors.HexColor("#3b82f6")
+        align_title = 0
+        margin = 32
+    elif slug == "modern-two-column":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#2563eb") # Royal Blue
+        accent_color = colors.HexColor("#0284c7")
+        align_title = 0
+        margin = 28
+    elif slug == "color-sidebar":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#0284c7") # Sky
+        accent_color = colors.HexColor("#0369a1")
+        align_title = 0
+        margin = 24
+    elif slug == "minimalist-elegant":
+        font_main, font_bold, font_italic = "Times-Roman", "Times-Bold", "Times-Italic"
+        primary_color = colors.HexColor("#1e293b") # Muted Slate
+        accent_color = colors.HexColor("#64748b")
+        align_title = 1
+        margin = 36
+    elif slug == "bold-creative":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#b91c1c") # Bold Red
+        accent_color = colors.HexColor("#dc2626")
+        align_title = 0
+        margin = 30
+    elif slug == "software-engineer":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#0284c7") # Cyan Tech
+        accent_color = colors.HexColor("#0f172a")
+        align_title = 0
+        margin = 30
+    elif slug == "ai-ml-engineer":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#6d28d9") # Violet
+        accent_color = colors.HexColor("#8b5cf6")
+        align_title = 1
+        margin = 32
+    elif slug == "data-scientist":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#4338ca") # Indigo
+        accent_color = colors.HexColor("#6366f1")
+        align_title = 1
+        margin = 32
+    elif slug == "developer-portfolio":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#0e7490") # Dark Cyan
+        accent_color = colors.HexColor("#06b6d4")
+        align_title = 0
+        margin = 30
+    elif slug == "timeline-resume":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#0369a1") # Ocean Blue
+        accent_color = colors.HexColor("#0284c7")
+        align_title = 0
+        margin = 30
+    elif slug == "infographic-resume":
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#5b21b6") # Deep Purple
+        accent_color = colors.HexColor("#7c3aed")
+        align_title = 0
+        margin = 28
+    else:
+        font_main, font_bold, font_italic = "Helvetica", "Helvetica-Bold", "Helvetica-Oblique"
+        primary_color = colors.HexColor("#0f172a")
+        accent_color = colors.HexColor("#2563eb")
+        align_title = 1
+        margin = 32
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=letter,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin
+    )
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        'ResumeTitle',
+        parent=styles['Normal'],
+        fontSize=18,
+        leading=21,
+        fontName=font_bold,
+        alignment=align_title,
+        textColor=primary_color
+    )
+    contact_style = ParagraphStyle(
+        'ResumeContact',
+        parent=styles['Normal'],
+        fontSize=8.5,
+        leading=11.5,
+        fontName=font_main,
+        alignment=align_title,
+        textColor=colors.HexColor('#475569')
+    )
+    section_style = ParagraphStyle(
+        'ResumeSection',
+        parent=styles['Normal'],
+        fontSize=10.5,
+        leading=13.5,
+        fontName=font_bold,
+        textColor=primary_color,
+        spaceBefore=6,
+        spaceAfter=2
+    )
+    body_style = ParagraphStyle(
+        'ResumeBody',
+        parent=styles['Normal'],
+        fontSize=8.5,
+        leading=11.5,
+        fontName=font_main,
+        textColor=colors.HexColor('#1e293b')
+    )
+    bullet_style = ParagraphStyle(
+        'ResumeBullet',
+        parent=body_style,
+        leftIndent=10,
+        bulletIndent=3,
+        spaceBefore=1,
+        spaceAfter=1
+    )
+    item_header_style = ParagraphStyle(
+        'ItemHeader',
+        parent=styles['Normal'],
+        fontSize=9.5,
+        leading=13,
+        fontName='Helvetica-Bold',
+        textColor=colors.HexColor('#0f172a'),
+        spaceBefore=3
+    )
+
+    story = []
+
+    # 1. Header (Personal Info)
+    personal = data.get("personal_info", {})
+    name = personal.get("full_name") or personal.get("name") or "Candidate Resume"
+    story.append(Paragraph(html.escape(name), title_style))
+    story.append(Spacer(1, 2))
+
+    contact_parts = []
+    if personal.get("email"):
+        contact_parts.append(html.escape(personal["email"]))
+    if personal.get("phone"):
+        contact_parts.append(html.escape(personal["phone"]))
+    loc = personal.get("location") or personal.get("address")
+    if loc:
+        contact_parts.append(html.escape(loc))
+    if personal.get("linkedin"):
+        contact_parts.append(f'<a href="{html.escape(personal["linkedin"])}"><u>LinkedIn</u></a>')
+    if personal.get("github"):
+        contact_parts.append(f'<a href="{html.escape(personal["github"])}"><u>GitHub</u></a>')
+
+    if contact_parts:
+        story.append(Paragraph(" &bull; ".join(contact_parts), contact_style))
+        story.append(Spacer(1, 4))
+
+    story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e1"), spaceBefore=2, spaceAfter=5))
+
+    # 2. Professional Summary
+    summary = data.get("summary") or data.get("professional_summary") or data.get("career_objective")
+    if summary and summary.strip():
+        story.append(Paragraph("PROFESSIONAL SUMMARY", section_style))
+        story.append(Paragraph(html.escape(summary.strip()), body_style))
+        story.append(Spacer(1, 4))
+
+    # 3. Technical Skills
+    skills = data.get("skills")
+    if skills:
+        story.append(Paragraph("TECHNICAL SKILLS", section_style))
+        if isinstance(skills, dict):
+            for cat, s_list in skills.items():
+                items_str = ", ".join(s_list) if isinstance(s_list, list) else str(s_list)
+                story.append(Paragraph(f"<b>{html.escape(cat)}:</b> {html.escape(items_str)}", body_style))
+        elif isinstance(skills, list):
+            story.append(Paragraph(html.escape(", ".join(skills)), body_style))
+        elif isinstance(skills, str):
+            story.append(Paragraph(html.escape(skills), body_style))
+        story.append(Spacer(1, 4))
+
+    # 4. Work Experience
+    experience = data.get("experience") or data.get("work_experience") or []
+    if experience:
+        story.append(Paragraph("WORK EXPERIENCE", section_style))
+        for exp in experience:
+            job_title = exp.get("title") or exp.get("role") or ""
+            company = exp.get("company") or ""
+            dates = f"{exp.get('start_date', '')} &ndash; {exp.get('end_date', 'Present')}".strip(" &ndash;")
+            loc_str = f" ({exp.get('location')})" if exp.get("location") else ""
+
+            header_text = f"<b>{html.escape(job_title)}</b>"
+            if company:
+                header_text += f" &mdash; <i>{html.escape(company)}</i>{loc_str}"
+            if dates:
+                header_text += f' <font color="#64748b">[{dates}]</font>'
+
+            story.append(Paragraph(header_text, item_header_style))
+
+            bullets = exp.get("bullets") or exp.get("highlights") or exp.get("description") or []
+            if isinstance(bullets, str):
+                bullets = [b.strip() for b in bullets.split("\n") if b.strip()]
+            for b in bullets:
+                story.append(Paragraph(f"&bull; {html.escape(str(b))}", bullet_style))
+            story.append(Spacer(1, 2))
+        story.append(Spacer(1, 4))
+
+    # 5. Projects
+    projects = data.get("projects") or []
+    if projects:
+        story.append(Paragraph("PROJECTS", section_style))
+        for proj in projects:
+            p_name = proj.get("name") or proj.get("title") or ""
+            tech = proj.get("technologies") or proj.get("tech_stack") or ""
+            if isinstance(tech, list):
+                tech = ", ".join(str(t) for t in tech)
+            elif not isinstance(tech, str):
+                tech = str(tech)
+            dates = f"{proj.get('start_date', '')} {proj.get('end_date', '')}".strip()
+
+            p_header = f"<b>{html.escape(p_name)}</b>"
+            if tech:
+                p_header += f" <font color='#475569'>| <i>{html.escape(tech)}</i></font>"
+            if dates:
+                p_header += f" <font color='#64748b'>[{dates}]</font>"
+            story.append(Paragraph(p_header, item_header_style))
+
+            bullets = proj.get("bullets") or proj.get("description") or []
+            if isinstance(bullets, str):
+                bullets = [b.strip() for b in bullets.split("\n") if b.strip()]
+            for b in bullets:
+                story.append(Paragraph(f"&bull; {html.escape(str(b))}", bullet_style))
+            story.append(Spacer(1, 2))
+        story.append(Spacer(1, 4))
+
+    # 6. Education
+    education = data.get("education") or []
+    if education:
+        story.append(Paragraph("EDUCATION", section_style))
+        for edu in education:
+            degree = edu.get("degree") or ""
+            inst = edu.get("institution") or edu.get("university") or ""
+            dates = f"{edu.get('start_date', '')} &ndash; {edu.get('end_date', edu.get('graduation_year', ''))}".strip(" &ndash;")
+            gpa = f"GPA: {edu.get('gpa')}" if edu.get("gpa") else ""
+
+            edu_header = f"<b>{html.escape(degree)}</b>"
+            if inst:
+                edu_header += f" &mdash; <i>{html.escape(inst)}</i>"
+            if dates:
+                edu_header += f' <font color="#64748b">[{dates}]</font>'
+            if gpa:
+                edu_header += f' &bull; <font color="#475569">{gpa}</font>'
+            story.append(Paragraph(edu_header, item_header_style))
+        story.append(Spacer(1, 4))
+
+    # 7. Certifications
+    certs = data.get("certifications") or []
+    if certs:
+        story.append(Paragraph("CERTIFICATIONS", section_style))
+        if isinstance(certs, list):
+            for c in certs:
+                story.append(Paragraph(f"&bull; {html.escape(str(c))}", bullet_style))
+        elif isinstance(certs, str):
+            story.append(Paragraph(html.escape(certs), body_style))
+
+    doc.build(story)
+    return buf.getvalue()
+

@@ -1,0 +1,1423 @@
+import { useAuthStore } from "@/store/authStore";
+
+// Private data is cached only by the identity-scoped React Query provider.
+const customFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  try {
+    const res = await fetch(input, { credentials: "include", ...init, cache: "no-store" });
+    if (res.status === 401 && !input.toString().includes("/auth/") && typeof window !== "undefined") {
+      useAuthStore.getState().logout();
+      if (window.location.pathname !== "/login") window.location.href = "/login";
+    }
+    return res;
+  } catch (error: any) {
+    console.warn(`[customFetch] Network request to ${input.toString()} failed:`, error);
+    throw new Error(error?.message || "Network error: Unable to connect to VidyaMarg backend API");
+  }
+};
+
+export const getBaseUrl = () => (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1").replace(/\/$/, "");
+
+export const getBackendBaseUrl = () => {
+  const baseUrl = getBaseUrl();
+  return baseUrl.replace(/\/api\/v1\/?$/, "");
+};
+
+export const getWsUrl = () => {
+  if (process.env.NEXT_PUBLIC_WS_URL) {
+    return process.env.NEXT_PUBLIC_WS_URL;
+  }
+  const backendBase = getBackendBaseUrl();
+  const wsProto = backendBase.startsWith("https://") ? "wss://" : "ws://";
+  const domain = backendBase.replace(/^https?:\/\//, "");
+  return `${wsProto}${domain}/ws`;
+};
+
+export const getAgentWsUrl = (runId: number | string) => {
+  const backendBase = getBackendBaseUrl();
+  const wsProto = backendBase.startsWith("https://") ? "wss://" : "ws://";
+  const domain = backendBase.replace(/^https?:\/\//, "");
+  return `${wsProto}${domain}/api/v1/ws/agent/${runId}`;
+};
+const getHeaders = () => {
+  const headers: Record<string, string> = {};
+  if (typeof window !== "undefined") {
+    const token = localStorage.getItem("token");
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    const match = typeof document !== "undefined" && document.cookie ? document.cookie.match(/csrf_token=([^;]+)/) : null;
+    if (match) {
+      headers["X-CSRF-Token"] = decodeURIComponent(match[1]);
+    }
+  }
+  return headers;
+};
+
+export const apiService = {
+  // Auth
+  async signup(data: any) {
+    const res = await customFetch(`${getBaseUrl()}/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Signup failed");
+    return res.json();
+  },
+
+  async login(formData: URLSearchParams) {
+    const res = await customFetch(`${getBaseUrl()}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formData.toString(),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Login failed");
+    return res.json();
+  },
+
+  async getMe() {
+    const res = await customFetch(`${getBaseUrl()}/auth/me`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch session");
+    return res.json();
+  },
+
+  async forgotPassword(email: string) {
+    const res = await customFetch(`${getBaseUrl()}/auth/forgot-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to request reset code");
+    return res.json();
+  },
+
+  async resetPassword(data: { email: string; new_password: string; code: string }) {
+    const res = await customFetch(`${getBaseUrl()}/auth/reset-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to reset password");
+    return res.json();
+  },
+
+
+
+
+  async logout(refreshToken?: string) {
+    const res = await customFetch(`${getBaseUrl()}/auth/logout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    useAuthStore.getState().logout();
+    if (!res.ok) throw new Error((await res.json()).detail || "Logout failed");
+    return res.json();
+  },
+
+  // Profile
+  async getProfile() {
+    const res = await customFetch(`${getBaseUrl()}/candidates/profile`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get profile");
+    return res.json();
+  },
+
+  async updateProfile(data: any) {
+    const res = await customFetch(`${getBaseUrl()}/candidates/profile`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to update profile");
+    return res.json();
+  },
+
+  async uploadResume(file: File, fast?: boolean) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const url = fast
+      ? `${getBaseUrl()}/candidates/resume?fast=true`
+      : `${getBaseUrl()}/candidates/resume`;
+    const res = await customFetch(url, {
+      method: "POST",
+      headers: getHeaders(),
+      body: formData,
+    });
+    if (!res.ok) throw new Error("Failed to upload resume");
+    return res.json();
+  },
+
+  async getResumeUrl() {
+    const res = await customFetch(`${getBaseUrl()}/candidates/resume`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async getResumes() {
+    try {
+      const res = await customFetch(`${getBaseUrl()}/candidates/resumes`, {
+        headers: getHeaders(),
+      });
+      let list: any[] = [];
+      if (res.ok) {
+        list = await res.json();
+      }
+      if (!Array.isArray(list) || list.length === 0) {
+        const activeRes = await customFetch(`${getBaseUrl()}/resumes/active`, {
+          headers: getHeaders(),
+        });
+        if (activeRes.ok) {
+          const activeData = await activeRes.json();
+          if (activeData && activeData.has_resume && activeData.active_resume) {
+            list = [activeData.active_resume];
+          }
+        }
+      }
+      return list;
+    } catch {
+      return [];
+    }
+  },
+
+  async deleteResumeVersion(id: number) {
+    const res = await customFetch(`${getBaseUrl()}/candidates/resume/${id}`, {
+      method: "DELETE",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to delete resume");
+    return res.json();
+  },
+
+  async analyzeResume(force?: boolean) {
+    const url = force 
+      ? `${getBaseUrl()}/candidates/resume/analyze?force=true`
+      : `${getBaseUrl()}/candidates/resume/analyze`;
+    const res = await customFetch(url, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Resume analysis failed. Please retry.");
+    return res.json();
+  },
+
+  async getResumeProfile() {
+    const res = await customFetch(`${getBaseUrl()}/resume/profile`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load resume profile");
+    return res.json();
+  },
+
+  async getResumeCareerDna() {
+    const res = await customFetch(`${getBaseUrl()}/resume/career-dna`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load career DNA");
+    return res.json();
+  },
+
+  async getActiveResume() {
+    try {
+      const headers = getHeaders();
+      if (!headers["Authorization"]) {
+        return { has_resume: false, active_resume: null, structured_data: null };
+      }
+      const res = await customFetch(`${getBaseUrl()}/resumes/active`, {
+        headers,
+      });
+      if (!res.ok) {
+        return { has_resume: false, active_resume: null, structured_data: null };
+      }
+      return res.json();
+    } catch (err) {
+      console.warn("getActiveResume fetch warning:", err);
+      return { has_resume: false, active_resume: null, structured_data: null };
+    }
+  },
+
+  async setActiveResume(resumeId: number) {
+    const headers = getHeaders();
+    if (!headers["Authorization"]) return null;
+    const res = await customFetch(`${getBaseUrl()}/resumes/active/set/${resumeId}`, {
+      method: "POST",
+      headers,
+    });
+    if (!res.ok) throw new Error("Failed to set active resume");
+    return res.json();
+  },
+
+  async getResumeSkills() {
+    const res = await customFetch(`${getBaseUrl()}/resume/skills`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load skills graph");
+    return res.json();
+  },
+
+  async getResumeRoles() {
+    const res = await customFetch(`${getBaseUrl()}/resume/roles`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load generated roles");
+    return res.json();
+  },
+
+  async getResumeCareerPaths() {
+    const res = await customFetch(`${getBaseUrl()}/resume/career-paths`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load career paths");
+    return res.json();
+  },
+
+  async getResumeSkillGaps() {
+    const res = await customFetch(`${getBaseUrl()}/resume/skill-gaps`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load skill gaps");
+    return res.json();
+  },
+
+  async getResumeOpportunities() {
+    const res = await customFetch(`${getBaseUrl()}/resume/opportunities`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load opportunities");
+    return res.json();
+  },
+
+  async getResumeMarketIntelligence() {
+    const res = await customFetch(`${getBaseUrl()}/resume/market-intelligence`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load market trends");
+    return res.json();
+  },
+
+  async createResumeAgent() {
+    const res = await customFetch(`${getBaseUrl()}/resume/create-agent`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to trigger agent creation");
+    return res.json();
+  },
+
+  async getResumeImprovements() {
+    const res = await customFetch(`${getBaseUrl()}/resume/improvements`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load resume improvements");
+    return res.json();
+  },
+
+
+
+
+
+  // Assessments
+  async getAssessment(appId: number) {
+    const res = await customFetch(`${getBaseUrl()}/assessments/attempt/${appId}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch assessment details");
+    return res.json();
+  },
+
+  async submitAssessment(appId: number, answers: any) {
+    const res = await customFetch(`${getBaseUrl()}/assessments/attempt/${appId}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ answers: JSON.stringify(answers) }),
+    });
+    if (!res.ok) throw new Error("Failed to submit assessment");
+    return res.json();
+  },
+
+  async logProctorEvent(appId: number, eventType: string, details: string) {
+    const res = await customFetch(`${getBaseUrl()}/assessments/proctor/log/${appId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ event_type: eventType, details }),
+    });
+    return res.ok;
+  },
+
+  // Interviews
+  async getInterview(appId: number) {
+    const res = await customFetch(`${getBaseUrl()}/interviews/${appId}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch interview session");
+    return res.json();
+  },
+
+  async answerInterviewQuestion(interviewId: number, answer: string) {
+    const res = await customFetch(`${getBaseUrl()}/interviews/${interviewId}/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ answer }),
+    });
+    if (!res.ok) throw new Error("Failed to send reply");
+    return res.json();
+  },
+
+  async getInterviewAnalysis(interviewId: number) {
+    const res = await customFetch(`${getBaseUrl()}/interviews/${interviewId}/analysis`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch interview analysis");
+    return res.json();
+  },
+
+  // Offers
+  async getOffer(appId: number) {
+    const res = await customFetch(`${getBaseUrl()}/offers/${appId}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch offer");
+    return res.json();
+  },
+
+  async respondOffer(offerId: number, accept: boolean) {
+    const res = await customFetch(`${getBaseUrl()}/offers/${offerId}/respond?accept=${accept}`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to record text reply");
+    return res.json();
+  },
+
+  // Admin Dashboard & Rankings
+  async getAdminMetrics() {
+    const res = await customFetch(`${getBaseUrl()}/admin/dashboard`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch metrics");
+    return res.json();
+  },
+
+
+
+  async getCandidates() {
+    const res = await customFetch(`${getBaseUrl()}/admin/candidates`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch candidates");
+    return res.json();
+  },
+
+  // Notifications
+  async getNotifications() {
+    const res = await customFetch(`${getBaseUrl()}/notifications`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch notifications");
+    return res.json();
+  },
+
+  async readNotification(id: number) {
+    const res = await customFetch(`${getBaseUrl()}/notifications/${id}/read`, {
+      method: "PUT",
+      headers: getHeaders(),
+    });
+    return res.ok;
+  },
+
+  // Emails
+  async getCandidateEmails() {
+    const res = await customFetch(`${getBaseUrl()}/candidates/emails`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch emails");
+    return res.json();
+  },
+
+  async readCandidateEmail(id: number) {
+    const res = await customFetch(`${getBaseUrl()}/candidates/emails/${id}/read`, {
+      method: "PUT",
+      headers: getHeaders(),
+    });
+    return res.ok;
+  },
+
+  async chatCopilot(message: string, history: any[]) {
+    const res = await customFetch(`${getBaseUrl()}/chat/copilot`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ message, history }),
+    });
+    if (!res.ok) throw new Error("Failed to get response from Baelyx");
+    return res.json();
+  },
+
+  async getCourses() {
+    const res = await customFetch(`${getBaseUrl()}/courses`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch courses");
+    return res.json();
+  },
+
+  async generateCourse(role: string, level: string, duration: string, goal: string, description?: string) {
+    const res = await customFetch(`${getBaseUrl()}/courses/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ topic: role, role, level, duration, goal, description }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "Failed to generate course" }));
+      let detailMsg = "Failed to generate course";
+      if (err.detail) {
+        if (typeof err.detail === "string") {
+          detailMsg = err.detail;
+        } else if (Array.isArray(err.detail)) {
+          detailMsg = err.detail.map((e: any) => e.msg || JSON.stringify(e)).join(", ");
+        } else {
+          detailMsg = typeof err.detail === "object" ? JSON.stringify(err.detail) : String(err.detail);
+        }
+      }
+      throw new Error(detailMsg);
+    }
+    return res.json();
+  },
+
+  async createCourse(title: string, instructor: string, category: string, level: string, description: string, duration: string) {
+    const res = await customFetch(`${getBaseUrl()}/courses/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ title, instructor, category, level, description, duration }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "Failed to create course" }));
+      throw new Error(err.detail || "Failed to create course");
+    }
+    return res.json();
+  },
+
+  async getCourseCurriculum(courseId: string | number) {
+    const res = await customFetch(`${getBaseUrl()}/courses/${courseId}/curriculum`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch course curriculum");
+    return res.json();
+  },
+
+  async enrollCourse(courseId: string | number) {
+    const res = await customFetch(`${getBaseUrl()}/courses/${courseId}/enroll`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to enroll in course");
+    return res.json();
+  },
+
+  async completeLesson(lessonId: string | number) {
+    const res = await customFetch(`${getBaseUrl()}/lessons/${lessonId}/complete`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to mark lesson complete");
+    return res.json();
+  },
+
+  async completePdf(pdfId: string | number) {
+    const res = await customFetch(`${getBaseUrl()}/pdfs/${pdfId}/complete`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to mark PDF complete");
+    return res.json();
+  },
+
+  async getEnrollments() {
+    const res = await customFetch(`${getBaseUrl()}/enrollments`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch enrollments");
+    return res.json();
+  },
+
+  async getCertificates() {
+    const res = await customFetch(`${getBaseUrl()}/certificates`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch certificates");
+    return res.json();
+  },
+
+  async submitQuiz(quizId: string | number, answers: any) {
+    const res = await customFetch(`${getBaseUrl()}/quiz/${quizId}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ answers: JSON.stringify(answers) }),
+    });
+    if (!res.ok) throw new Error("Failed to submit quiz");
+    return res.json();
+  },
+
+  async submitWrittenAssessment(writtenId: string | number, answers: any) {
+    const res = await customFetch(`${getBaseUrl()}/written/${writtenId}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ answers: JSON.stringify(answers) }),
+    });
+    if (!res.ok) throw new Error("Failed to submit written assessment");
+    return res.json();
+  },
+
+  async submitModuleInterview(interviewId: string | number, answers: any) {
+    const res = await customFetch(`${getBaseUrl()}/interview/${interviewId}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ answers: JSON.stringify(answers) }),
+    });
+    if (!res.ok) throw new Error("Failed to submit interview");
+    return res.json();
+  },
+
+  async getCareerReadiness() {
+    const res = await customFetch(`${getBaseUrl()}/career-readiness`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch career readiness");
+    return res.json();
+  },
+
+  async getMessages() {
+    const res = await customFetch(`${getBaseUrl()}/messages`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch messages");
+    return res.json();
+  },
+
+  async sendMessage(chatId: string, text: string) {
+    const res = await customFetch(`${getBaseUrl()}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ chat_id: chatId, text }),
+    });
+    if (!res.ok) throw new Error("Failed to send message");
+    return res.json();
+  },
+
+  async saveHackathonAssignment(candidateId: number, data: any) {
+    const res = await customFetch(`${getBaseUrl()}/candidates/${candidateId}/hackathon`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to save hackathon assignment");
+    return res.json();
+  },
+
+  async sendAdminMessage(candidateId: number, chatId: string, sender: string, senderName: string, text: string) {
+    const res = await customFetch(`${getBaseUrl()}/admin/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ candidate_id: candidateId, chat_id: chatId, sender, sender_name: senderName, text }),
+    });
+    if (!res.ok) throw new Error("Failed to send admin message");
+    return res.json();
+  },
+
+  async getAdminCandidateMessages(candidateId: number) {
+    const res = await customFetch(`${getBaseUrl()}/admin/candidates/${candidateId}/messages`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch candidate messages");
+    return res.json();
+  },
+
+  async getCandidateFiles(candidateId: number) {
+    const res = await customFetch(`${getBaseUrl()}/admin/candidates/${candidateId}/files`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+
+  async startAgentRun(maxJobAgeDays?: number) {
+    const query = maxJobAgeDays ? `?max_job_age_days=${maxJobAgeDays}` : "";
+    const res = await customFetch(`${getBaseUrl()}/candidate/agent/run${query}`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to start agent run");
+    return res.json();
+  },
+
+  async getLatestAgentRun() {
+    const res = await customFetch(`${getBaseUrl()}/candidate/agent/run/latest`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch latest agent run");
+    return res.json();
+  },
+
+  async getAgentRunResult() {
+    const res = await customFetch(`${getBaseUrl()}/candidate/agent/result`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch agent run result");
+    return res.json();
+  },
+
+  async getTelegramSources() {
+    const res = await customFetch(`${getBaseUrl()}/admin/telegram-sources`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch Telegram sources");
+    return res.json();
+  },
+
+  async createTelegramSource(channelName: string, active: boolean = true) {
+    const res = await customFetch(`${getBaseUrl()}/admin/telegram-sources`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ channel_name: channelName, active }),
+    });
+    if (!res.ok) throw new Error("Failed to create Telegram source");
+    return res.json();
+  },
+
+  async updateTelegramSource(id: number, channelName: string, active: boolean) {
+    const res = await customFetch(`${getBaseUrl()}/admin/telegram-sources/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ channel_name: channelName, active }),
+    });
+    if (!res.ok) throw new Error("Failed to update Telegram source");
+    return res.json();
+  },
+
+  async deleteTelegramSource(id: number) {
+    const res = await customFetch(`${getBaseUrl()}/admin/telegram-sources/${id}`, {
+      method: "DELETE",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to delete Telegram source");
+    return res.json();
+  },
+
+  async getPreferences() {
+    const res = await customFetch(`${getBaseUrl()}/users/me/preferences`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch preferences");
+    return res.json();
+  },
+
+  async updatePreferences(theme: string) {
+    const res = await customFetch(`${getBaseUrl()}/users/me/preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ theme }),
+    });
+    if (!res.ok) throw new Error("Failed to update preferences");
+    return res.json();
+  },
+
+  async saveResumeLearning(data: { courseId: string | number, lessonId: string, playbackPosition: number, watchedSegments: number[], completion: number }) {
+    const res = await customFetch(`${getBaseUrl()}/resume-learning`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to save resume learning");
+    return res.json();
+  },
+
+  async getResumeLearning(courseId: string | number) {
+    const res = await customFetch(`${getBaseUrl()}/resume-learning/${courseId}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get resume learning");
+    return res.json();
+  },
+
+  async getContinueLearning() {
+    const res = await customFetch(`${getBaseUrl()}/continue-learning`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get continue learning");
+    return res.json();
+  },
+
+  async saveVideoAnalytics(data: { lessonId: string, loadTime: number, bufferCount: number, bufferDuration: number, playbackFailures: number, device?: string, browser?: string }) {
+    const res = await customFetch(`${getBaseUrl()}/video-analytics`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to save video analytics");
+    return res.json();
+  },
+
+  async saveLearningEvent(data: { eventType: string, lessonId: string, metadata?: any }) {
+    const res = await customFetch(`${getBaseUrl()}/learning-events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to save learning event");
+    return res.json();
+  },
+
+  async getUserStats() {
+    const res = await customFetch(`${getBaseUrl()}/user-stats`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get user stats");
+    return res.json();
+  },
+
+  // AI Mentor Endpoints
+  async getAIMentorProfile() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/profile`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor profile");
+    return res.json();
+  },
+
+  async getAIMentorRiskAnalysis() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/risk-analysis`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor risk analysis");
+    return res.json();
+  },
+
+  async getAIMentorAnalytics() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/analytics`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor analytics");
+    return res.json();
+  },
+
+  async getAIMentorSessions() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/sessions`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor sessions");
+    return res.json();
+  },
+
+  async createAIMentorSession(title: string) {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) throw new Error("Failed to create AI mentor session");
+    return res.json();
+  },
+
+  async renameAIMentorSession(sessionId: string, title: string) {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/sessions/${sessionId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) throw new Error("Failed to rename AI mentor session");
+    return res.json();
+  },
+
+  async deleteAIMentorSession(sessionId: string) {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to delete AI mentor session");
+    return res.json();
+  },
+
+  async getAIMentorMessages(sessionId: string) {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/sessions/${sessionId}/messages`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor messages");
+    return res.json();
+  },
+
+  async sendAIMentorChat(sessionId: string, message: string, mode: string = "tutor") {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/sessions/${sessionId}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ message, mode }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to send chat message");
+    return res.json();
+  },
+
+  async generateAIMentorStudyPlan(duration: string, title?: string) {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/study-plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ duration, title }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to generate study plan");
+    return res.json();
+  },
+
+  async getAIMentorStudyPlans() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/study-plans`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor study plans");
+    return res.json();
+  },
+
+  async getAIMentorArtifacts() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/artifacts`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor artifacts");
+    return res.json();
+  },
+
+  async createAIMentorArtifact(data: { artifact_type: string; title: string; content: string; metadata_json?: any }) {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/artifacts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to create AI mentor artifact");
+    return res.json();
+  },
+
+  async getAIMentorConfig() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/config`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get AI mentor configuration");
+    return res.json();
+  },
+
+  async searchAIMentor(q: string, type: string = "all", page: number = 1, pageSize: number = 50) {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/search?q=${encodeURIComponent(q)}&type=${encodeURIComponent(type)}&page=${page}&page_size=${pageSize}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to search AI mentor records");
+    return res.json();
+  },
+
+  async updateCareerGoal(career_goal: string, target_role: string = "Frontend Developer", target_level: string = "Mid-Level") {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/goal`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ career_goal, target_role, target_level }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to update career goal");
+    return res.json();
+  },
+
+  async runSupervisorAgent() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/agent/run`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to trigger supervisor agent");
+    return res.json();
+  },
+
+  async getAgentActivityFeed() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/agent/activity-feed`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get agent activity feed");
+    return res.json();
+  },
+
+  async mcpChat(message: string, mode: 'resume' | 'skill-lab' | 'job-agent' | 'general', history: any[], contextHint?: string, sessionId?: string) {
+    const res = await customFetch(`${getBaseUrl()}/mcp/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ message, mode, history, context_hint: contextHint, session_id: sessionId }),
+    });
+    if (!res.ok) throw new Error("Failed to send MCP chat message");
+    return res.json();
+  },
+
+  async mcpChatStream(message: string, mode: 'resume' | 'skill-lab' | 'job-agent' | 'general', history: any[], contextHint?: string, sessionId?: string): Promise<Response> {
+    const res = await customFetch(`${getBaseUrl()}/mcp/chat/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ message, mode, history, context_hint: contextHint, session_id: sessionId }),
+    });
+    if (!res.ok) throw new Error("Failed to start MCP chat stream");
+    return res;
+  },
+
+  async getMcpSessions(page = 1, limit = 20, search?: string) {
+    let url = `${getBaseUrl()}/mcp/sessions?page=${page}&limit=${limit}`;
+    if (search) {
+      url += `&search=${encodeURIComponent(search)}`;
+    }
+    const res = await customFetch(url, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch past chat sessions");
+    return res.json();
+  },
+
+  async getMcpSessionMessages(sessionId: string) {
+    const res = await customFetch(`${getBaseUrl()}/mcp/sessions/${sessionId}/messages`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch session messages");
+    return res.json();
+  },
+
+  async renameMcpSession(sessionId: string, title: string) {
+    const res = await customFetch(`${getBaseUrl()}/mcp/sessions/${sessionId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) throw new Error("Failed to rename session");
+    return res.json();
+  },
+
+  async pinMcpSession(sessionId: string, isPinned: boolean) {
+    const res = await customFetch(`${getBaseUrl()}/mcp/sessions/${sessionId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ is_pinned: isPinned }),
+    });
+    if (!res.ok) throw new Error("Failed to update session pin status");
+    return res.json();
+  },
+
+  async archiveMcpSession(sessionId: string, isArchived: boolean) {
+    const res = await customFetch(`${getBaseUrl()}/mcp/sessions/${sessionId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ is_archived: isArchived }),
+    });
+    if (!res.ok) throw new Error("Failed to archive session");
+    return res.json();
+  },
+
+  async deleteMcpSession(sessionId: string) {
+    const res = await customFetch(`${getBaseUrl()}/mcp/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to delete session");
+    return res.json();
+  },
+
+  async getAgentActivity(limit = 20) {
+    const res = await customFetch(`${getBaseUrl()}/agent/activity?limit=${limit}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch agent activity feed");
+    return res.json();
+  },
+
+  async getCareerPaths() {
+    const res = await customFetch(`${getBaseUrl()}/ai-mentor/career-paths`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to get career paths");
+    return res.json();
+  },
+
+  async getMCPServers() {
+    const res = await customFetch(`${getBaseUrl()}/mcp-gateway/servers`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch MCP servers");
+    return res.json();
+  },
+
+  async callMCPTool(server: string, tool: string, args: Record<string, any> = {}) {
+    const res = await customFetch(`${getBaseUrl()}/mcp-gateway/call`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ server, tool, arguments: args }),
+    });
+    if (!res.ok) throw new Error("MCP Tool call failed");
+    return res.json();
+  },
+
+  async getUserConsents() {
+    const res = await customFetch(`${getBaseUrl()}/mcp-gateway/consents`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to fetch user consents");
+    return res.json();
+  },
+
+  async updateUserConsent(consentType: string, granted: boolean) {
+    const res = await customFetch(`${getBaseUrl()}/mcp-gateway/consents`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify({ consent_type: consentType, granted }),
+    });
+    if (!res.ok) throw new Error("Failed to update user consent");
+    return res.json();
+  },
+
+
+
+
+
+  // ── Autonomous Tasks ──────────────────────────────────────────────────────
+  async getAutonomousTasks() {
+    const res = await customFetch(`${getBaseUrl()}/autonomous/tasks`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+  async createAutonomousTask(task: Record<string, unknown>) {
+    const res = await customFetch(`${getBaseUrl()}/autonomous/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(task),
+    });
+    if (!res.ok) throw new Error("Failed to create task");
+    return res.json();
+  },
+
+  async runAutonomousTaskNow(taskId: number) {
+    const res = await customFetch(
+      `${getBaseUrl()}/autonomous/tasks/${taskId}/run`,
+      { method: "POST", headers: getHeaders() }
+    );
+    if (!res.ok) throw new Error("Failed to run task");
+    return res.json();
+  },
+
+  // ── Career Health ─────────────────────────────────────────────────────────
+  async getCareerHealth() {
+    const res = await customFetch(`${getBaseUrl()}/candidate/career-health`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  // ── AI Job Agent ─────────────────────────────────────────────────────────
+  async initializeJobAgent() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/initialize`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to initialize agent");
+    return res.json();
+  },
+
+  async triggerAgentRun(runType: string = "full", fast: boolean = false) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/run`, {
+      method: "POST",
+      headers: { ...getHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ run_type: runType, fast }),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to trigger run");
+    return res.json();
+  },
+
+  async getAgentStatus() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/status`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async getJobAgentDashboard() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/dashboard`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load dashboard");
+    return res.json();
+  },
+
+  async getJobFeed(params?: {
+    page?: number;
+    page_size?: number;
+    min_score?: number;
+    seniority?: string;
+    is_remote?: boolean;
+    status_filter?: string;
+  }) {
+    const queryParams = new URLSearchParams();
+    if (params?.page) queryParams.set("page", String(params.page));
+    if (params?.page_size) queryParams.set("page_size", String(params.page_size));
+    if (params?.min_score !== undefined) queryParams.set("min_score", String(params.min_score));
+    if (params?.seniority) queryParams.set("seniority", params.seniority);
+    if (params?.is_remote !== undefined) queryParams.set("is_remote", String(params.is_remote));
+    if (params?.status_filter) queryParams.set("status_filter", params.status_filter);
+
+    const res = await customFetch(`${getBaseUrl()}/job-agent/jobs?${queryParams}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load jobs");
+    return res.json();
+  },
+
+  async getJobDetail(jobId: number) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/jobs/${jobId}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Job not found");
+    return res.json();
+  },
+
+  async reactToJob(jobId: number, reaction: string) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/jobs/${jobId}/react`, {
+      method: "POST",
+      headers: { ...getHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ reaction }),
+    });
+    if (!res.ok) throw new Error("Failed to record reaction");
+    return res.json();
+  },
+
+  async getApplications(statusFilter?: string) {
+    const url = statusFilter
+      ? `${getBaseUrl()}/job-agent/applications?status_filter=${statusFilter}`
+      : `${getBaseUrl()}/job-agent/applications`;
+    const res = await customFetch(url, { headers: getHeaders() });
+    if (!res.ok) throw new Error("Failed to load applications");
+    return res.json();
+  },
+
+  async createApplication(data: {
+    job_id: number;
+    status?: string;
+    notes?: string;
+    cover_letter?: string;
+    applied_via?: string;
+  }) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/applications`, {
+      method: "POST",
+      headers: { ...getHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Failed to create application");
+    return res.json();
+  },
+
+  async updateApplication(appId: number, data: {
+    status?: string;
+    notes?: string;
+    interview_notes?: string;
+    offer_salary?: number;
+    rejection_reason?: string;
+  }) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/applications/${appId}`, {
+      method: "PATCH",
+      headers: { ...getHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to update application");
+    return res.json();
+  },
+
+  async getJobAgentCareerPaths() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/career-paths`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async getSkillGaps() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/skill-gaps`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async getInterviewPrep(jobId: number) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/interview-prep/${jobId}`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load interview prep");
+    return res.json();
+  },
+
+  async getMarketIntelligence() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/market-intelligence`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async getCareerInsights() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/career-insights`, {
+      headers: getHeaders(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async getAgentNotifications(unreadOnly?: boolean) {
+    const url = unreadOnly
+      ? `${getBaseUrl()}/job-agent/notifications?unread_only=true`
+      : `${getBaseUrl()}/job-agent/notifications`;
+    const res = await customFetch(url, { headers: getHeaders() });
+    if (!res.ok) return null;
+    return res.json();
+  },
+
+  async markNotificationRead(notificationId: number) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/notifications/${notificationId}/read`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    return res.ok;
+  },
+
+  async markAllNotificationsRead() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/notifications/read-all`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    return res.ok;
+  },
+
+  async updateAgentPreferences(prefs: Record<string, any>) {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/preferences`, {
+      method: "PUT",
+      headers: { ...getHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(prefs),
+    });
+    if (!res.ok) throw new Error("Failed to update preferences");
+    return res.json();
+  },
+
+  async trackAgentEvent(eventType: string, entityType?: string, entityId?: number, properties?: Record<string, any>) {
+    try {
+      await customFetch(`${getBaseUrl()}/job-agent/analytics/event`, {
+        method: "POST",
+        headers: { ...getHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ event_type: eventType, entity_type: entityType, entity_id: entityId, properties }),
+      });
+    } catch {
+      // Non-blocking
+    }
+  },
+
+  // Jobs — personalized recommendations for the Jobs page
+  async getRecommendedJobs() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/jobs?page=1&page_size=20`, { headers: getHeaders() });
+    if (!res.ok) {
+      throw new Error("Failed to fetch jobs");
+    }
+    const data = await res.json();
+    const rawJobs = Array.isArray(data) ? data : (data.jobs || []);
+    return rawJobs.map((j: any) => ({
+      id: j.id,
+      title: j.title,
+      company: j.company_name || j.company || "Company",
+      location: j.location || (j.is_remote ? "Remote" : "On-site"),
+      employment_type: j.employment_type || "Full-time",
+      salary: j.salary_raw || (j.salary_min ? `$${j.salary_min}k - $${j.salary_max}k` : undefined),
+      description: j.description_summary || j.description,
+      required_skills: j.required_skills || [],
+      match_score: (j.overall_score !== undefined && j.overall_score !== null)
+        ? j.overall_score
+        : (j.match?.overall_score !== undefined && j.match?.overall_score !== null)
+        ? j.match.overall_score
+        : j.match_score,
+      matched_skills: j.matched_skills || j.match?.match_reasons || [],
+      missing_skills: j.missing_skills || j.match?.missing_skills || [],
+      application_url: j.apply_url || j.job_url,
+      posted_date: j.posted_at,
+      source: j.source_name || j.source || "Database",
+    }));
+  },
+
+  async getJobs(params?: { role?: string; location?: string; type?: string }) {
+    return this.getRecommendedJobs();
+  },
+
+  // ── AI CAREER AGENT (Global Natural-Language Autonomous Controller) ───────
+  async chatWithCareerAgent(data: {
+    message: string;
+    page_context?: Record<string, any>;
+    history?: Array<{ role: string; content: string }>;
+  }) {
+    const res = await customFetch(`${getBaseUrl()}/agent/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Career Agent request failed");
+    }
+    return res.json();
+  },
+
+  async confirmCareerAgentAction(data: {
+    action_id: string;
+    action_type: string;
+    payload: Record<string, any>;
+    confirmed: boolean;
+  }) {
+    const res = await customFetch(`${getBaseUrl()}/agent/confirm-action`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getHeaders() },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error("Failed to confirm action");
+    return res.json();
+  },
+
+  async getCareerAgentTools() {
+    const res = await customFetch(`${getBaseUrl()}/agent/tools`, { headers: getHeaders() });
+    if (!res.ok) return [];
+    return res.json();
+  },
+
+  async getCareerAgentContext() {
+    const res = await customFetch(`${getBaseUrl()}/agent/context`, { headers: getHeaders() });
+    if (!res.ok) return null;
+    return res.json();
+  },
+};
+
+export const apiClient = apiService;
+
+
+
+// Fetch local protected files with Authorization; never forward tokens to another host.
+export async function fetchPrivateFile(url: string): Promise<string> {
+  const backend = new URL(getBackendBaseUrl());
+  const target = new URL(url, backend);
+  const local = target.origin === backend.origin && target.pathname.startsWith("/api/v1/storage/");
+  if (!local && target.protocol !== "https:") throw new Error("Invalid file URL");
+  const response = await fetch(target, { headers: local ? getHeaders() : {}, cache: "no-store", credentials: "include" });
+  if (!response.ok) throw new Error("Unable to open file. Please sign in and try again.");
+  return URL.createObjectURL(await response.blob());
+}
+
+export async function downloadPrivateFile(url: string, filename = "document.pdf") {
+  const objectUrl = await fetchPrivateFile(url);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 60000);
+}
