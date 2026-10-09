@@ -2100,11 +2100,14 @@ export default function JobAgentPage() {
               <div>
                 <SectionHeader icon={<Icon.Target />} title="Target Roles" />
                 <div className="flex flex-wrap gap-2">
-                  {(agent?.target_roles || careerData?.target_roles || []).map((role: string) => (
-                    <span key={role} className="bg-violet-500/10 border border-violet-500/20 text-violet-300 px-3 py-1.5 rounded-lg text-sm">
-                      {role}
-                    </span>
-                  ))}
+                  {(agent?.target_roles || careerData?.target_roles || []).map((role: any, rIdx: number) => {
+                    const rStr = typeof role === "object" ? (role?.role || JSON.stringify(role)) : String(role);
+                    return (
+                      <span key={rIdx} className="bg-violet-500/10 border border-violet-500/20 text-violet-300 px-3 py-1.5 rounded-lg text-sm">
+                        {rStr}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             )}

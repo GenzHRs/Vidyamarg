@@ -5,7 +5,7 @@ normalized profile components, version history, template management, and job des
 """
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Index, Float
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, JSON, Index, Float, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
 
@@ -310,3 +310,123 @@ class JobDescription(Base):
 
     # Relationships
     candidate = relationship("Candidate")
+
+
+class ResumeOptimization(Base):
+    """
+    Stores derived JD-optimized resume analyses, ATS breakdown scores,
+    and truthfulness verification results. Never overwrites the master resume.
+
+    Storage Policy:
+    - optimized_data is the authoritative structured JSON snapshot.
+    - PDF/DOCX are generated on-demand from optimized_data (never stored by default).
+    - submitted_artifact_url is set ONLY after the candidate confirms submission;
+      it preserves the exact submitted document in private storage.
+    - is_immutable=True prevents any further modifications after submission.
+    - jd_hash enables idempotency: the same (candidate, master_resume, jd_text)
+      triple will reuse the existing record rather than creating a duplicate.
+    - content_hash enables deterministic render cache keying.
+    """
+    __tablename__ = "resume_optimizations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    candidate_id = Column(Integer, ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False, index=True)
+    master_resume_id = Column(Integer, ForeignKey("resumes.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_description_id = Column(Integer, ForeignKey("job_descriptions.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    # Job entity link (nullable — optimization may be JD-only without a job record)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    # Application entity link (set when candidate prepares to apply)
+    application_id = Column(Integer, ForeignKey("applications.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    template_id = Column(Integer, ForeignKey("resume_templates.id", ondelete="SET NULL"), nullable=True)
+    template_version = Column(String(50), nullable=True)  # e.g. "v1.2" for reproducible rendering
+
+    optimization_version = Column(Integer, nullable=False, default=1)
+
+    # Idempotency & integrity hashes
+    jd_hash = Column(String(64), nullable=True, index=True)       # SHA-256 of normalized JD text
+    content_hash = Column(String(64), nullable=True, index=True)  # SHA-256 of canonical optimized_data JSON
+
+    # ATS and verification scores (0-100)
+    ats_score = Column(Integer, nullable=False, default=0)
+    keyword_score = Column(Integer, nullable=False, default=0)
+    experience_score = Column(Integer, nullable=False, default=0)
+    technical_score = Column(Integer, nullable=False, default=0)
+    responsibility_score = Column(Integer, nullable=False, default=0)
+    alignment_score = Column(Integer, nullable=False, default=0)
+    quality_score = Column(Integer, nullable=False, default=0)
+    truthfulness_score = Column(Integer, nullable=False, default=100)
+
+    # Generated metadata
+    job_title = Column(String(255), nullable=True)
+    company = Column(String(255), nullable=True)
+    optimized_data = Column(JSON, nullable=False)
+    matched_skills = Column(JSON, nullable=True)
+    partial_matches = Column(JSON, nullable=True)
+    missing_skills = Column(JSON, nullable=True)
+    recommendations = Column(JSON, nullable=True)
+    ats_report = Column(JSON, nullable=True)
+
+    # Mode & Lineage Tracking
+    # rendering_mode: "template" (Mode A - choose template) | "original_layout" (Mode B - edit uploaded resume)
+    rendering_mode = Column(String(50), nullable=False, default="template")
+    # fidelity_tier: "original_layout_preserved" | "reconstructed_from_original" | "template_fallback"
+    fidelity_tier = Column(String(50), nullable=True, default="template_fallback")
+    parent_optimization_id = Column(Integer, ForeignKey("resume_optimizations.id", ondelete="SET NULL"), nullable=True)
+
+    # State Machine Fields
+    generation_state = Column(String(50), nullable=False, default="SUCCEEDED")  # QUEUED, RUNNING, SUCCEEDED, FAILED
+    layout_validation_status = Column(String(50), nullable=False, default="PASSED")  # PENDING, PASSED, WARNING, BLOCKED
+    layout_warnings = Column(JSON, default=list)
+
+    # Approval Tracking (explicit candidate review & signoff)
+    candidate_approved = Column(Boolean, nullable=False, default=False)
+    approved_at = Column(DateTime, nullable=True)
+    approval_hash = Column(String(64), nullable=True)  # hash of content reviewed & approved
+    approval_notes = Column(Text, nullable=True)
+
+    # Submission tracking (immutable once submitted)
+    is_submitted = Column(Boolean, nullable=False, default=False)
+    submitted_at = Column(DateTime, nullable=True)
+    submitted_artifact_url = Column(String(500), nullable=True)  # private storage path of submitted document
+    is_immutable = Column(Boolean, nullable=False, default=False)  # True after submission — prevents overwrite
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationships
+    candidate = relationship("Candidate")
+    master_resume = relationship("Resume", foreign_keys=[master_resume_id])
+    job_description = relationship("JobDescription")
+    evidence_items = relationship("ResumeOptimizationEvidence", back_populates="optimization", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        # Idempotency: same candidate + master resume + JD text hash = reuse existing record
+        UniqueConstraint("candidate_id", "master_resume_id", "jd_hash", name="uq_optimization_candidate_resume_jd"),
+        Index("idx_opt_candidate_job", "candidate_id", "job_id"),
+        Index("idx_opt_candidate_application", "candidate_id", "application_id"),
+        Index("idx_opt_candidate_created", "candidate_id", "created_at"),
+        Index("idx_opt_jd_hash", "jd_hash"),
+        Index("idx_opt_content_hash", "content_hash"),
+    )
+
+
+class ResumeOptimizationEvidence(Base):
+    """
+    Stores individual requirement-to-evidence mappings proving that
+    every optimization claim originated from the candidate's master profile.
+    """
+    __tablename__ = "resume_optimization_evidence"
+
+    id = Column(Integer, primary_key=True, index=True)
+    optimization_id = Column(Integer, ForeignKey("resume_optimizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    jd_requirement = Column(String(255), nullable=False)
+    candidate_evidence = Column(Text, nullable=True)
+    match_type = Column(String(50), nullable=False)  # STRONG_MATCH, PARTIAL_MATCH, WEAK_MATCH, NO_MATCH
+    confidence = Column(Float, nullable=False, default=1.0)
+    category = Column(String(50), nullable=True)  # technical, experience, responsibility, education
+
+    optimization = relationship("ResumeOptimization", back_populates="evidence_items")
+

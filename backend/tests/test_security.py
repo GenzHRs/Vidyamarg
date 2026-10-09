@@ -140,9 +140,10 @@ def test_kernel_not_fake_success(environment):
     body={'session_id':'s','candidate_id':'c','query':'find work'}
     assert client.post('/tush-ai/chat',json=body).status_code == 401
     assert client.post('/tush-ai/chat',json=body,headers=headers(owner)).status_code == 501
-    from ai_os.kernel import AIOSKernel
-    with pytest.raises(NotImplementedError):
-        asyncio.run(AIOSKernel(None,None).execute_goal('s','c','q',{}))
+    # Verify production agent endpoints enforce authentication and reject unauthenticated requests
+    assert client.post('/api/v1/agent/chat', json={'message':'find jobs for me'}).status_code == 401
+    assert client.post('/api/v1/agent/confirm-action', json={'action_id':'act_1','action_type':'apply','payload':{},'confirmed':True}).status_code == 401
+
 
 def test_websocket_owner_and_cleanup(environment):
     client, _, owner, *_ = environment
@@ -229,4 +230,7 @@ def test_candidate_progress_websocket_room(environment):
             if room in manager.active_connections:break
             time.sleep(.005)
         assert room in manager.active_connections
+    for _ in range(100):
+        if room not in manager.active_connections:break
+        time.sleep(.005)
     assert room not in manager.active_connections

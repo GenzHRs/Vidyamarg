@@ -72,6 +72,7 @@ def create_candidate_with_resume(db, user_email, full_name, role_title, skills_l
     db.add(cand)
     db.commit()
     db.refresh(cand)
+    invalidate_candidate_context(cand.id)
 
     resume = Resume(
         candidate_id=cand.id,

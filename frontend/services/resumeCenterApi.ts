@@ -238,6 +238,9 @@ export interface ResumeItem {
   latest_pdf_url?: string;
   latest_tex_url?: string;
   status: string;
+  is_active?: boolean;
+  is_verified?: boolean;
+  extraction_status?: string;
   created_at?: string;
   updated_at?: string;
   structured_data?: StructuredResumeData;
@@ -306,6 +309,120 @@ export interface SaveTailoredResumeResponse {
   source_resume_id: number;
 }
 
+export interface ScoreExplanation {
+  positive_factors: string[];
+  negative_factors: string[];
+  summary: string;
+  disclaimer: string;
+}
+
+export interface SkillGapClassification {
+  critical_gaps: string[];
+  important_gaps: string[];
+  optional_gaps: string[];
+}
+
+export interface ApplicationReadiness {
+  readiness_level: "HIGH" | "MEDIUM" | "LOW";
+  score: number;
+  required_skills_count: number;
+  matched_skills_count: number;
+  partial_skills_count: number;
+  missing_skills_count: number;
+  critical_missing_count: number;
+  recommendation: string;
+  reasoning: string[];
+}
+
+export interface ApplicationFieldItem {
+  field_key: string;
+  field_label: string;
+  field_type: "EXACT_FIELD" | "SEMANTIC_FIELD" | "MISSING_INFORMATION" | "USER_CONFIRMATION_REQUIRED";
+  value?: any;
+  source: string;
+  confidence: number;
+  user_confirmed: boolean;
+}
+
+export interface PreparedApplication {
+  status: "DRAFT" | "PREPARED" | "REVIEW_REQUIRED" | "CONFIRMED" | "SUBMITTED";
+  job_title: string;
+  company: string;
+  exact_fields: ApplicationFieldItem[];
+  semantic_fields: ApplicationFieldItem[];
+  missing_fields: ApplicationFieldItem[];
+  requires_user_confirmation: boolean;
+  submission_allowed: boolean;
+}
+
+export interface JDOptimizeRequest {
+  resume_id?: number;
+  job_description: string;
+  template_id?: number;
+  job_title?: string;
+  company?: string;
+  job_id?: number;
+  application_id?: number;
+  force_new?: boolean;
+  rendering_mode?: "template" | "original_layout";
+}
+
+export interface JDOptimizeResponse {
+  optimization_id: number;
+  master_resume_id: number;
+  job_id?: number | null;
+  application_id?: number | null;
+  ats_score: number;
+  resume_match_score?: number;
+  keyword_match: number;
+  experience_match: number;
+  technical_match: number;
+  responsibility_match: number;
+  alignment_score: number;
+  quality_score?: number;
+  truthfulness_score: number;
+  score_breakdown?: Record<string, number>;
+  score_explanation?: ScoreExplanation;
+  skill_gaps?: SkillGapClassification;
+  application_readiness?: ApplicationReadiness;
+  prepared_application?: PreparedApplication;
+  optimized_resume: StructuredResumeData;
+  matched_skills: string[];
+  partial_matches: string[];
+  missing_skills: string[];
+  recommendations: string[];
+  ats_report: Record<string, any>;
+  job_title: string;
+  dynamic_title?: string;
+  generated_title?: string;
+  company: string;
+  is_submitted?: boolean;
+  is_immutable?: boolean;
+  submitted_at?: string | null;
+  submitted_artifact_url?: string | null;
+  jd_hash?: string | null;
+  content_hash?: string | null;
+  optimization_version?: number;
+  template_version?: string | null;
+  rendering_mode?: string;
+  fidelity_tier?: string;
+  candidate_approved?: boolean;
+  approved_at?: string | null;
+  approval_hash?: string | null;
+  approval_notes?: string | null;
+  layout_validation_status?: string;
+  layout_warnings?: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+  evidence_items: Array<{
+    requirement: string;
+    evidence: string;
+    match_type: string;
+    confidence: number;
+    category?: string | null;
+  }>;
+}
+
 class ResumeCenterApiService {
   // ── TEMPLATES ─────────────────────────────────────────────────────────────
   async getTemplates(): Promise<ResumeTemplateItem[]> {
@@ -350,7 +467,7 @@ class ResumeCenterApiService {
       if (!res.ok) {
         if (res.status === 401 && typeof window !== "undefined") {
           localStorage.removeItem("token");
-          window.location.href = "/auth/login";
+          window.location.href = "/login";
         }
         return [];
       }
@@ -799,6 +916,121 @@ class ResumeCenterApiService {
     }
     return res.json();
   }
+
+  // ── JD-DRIVEN ATS OPTIMIZATION ENGINE ──────────────────────────────────────
+  async optimizeResume(data: JDOptimizeRequest): Promise<JDOptimizeResponse> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resume/optimize`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to optimize resume for target job");
+    }
+    return res.json();
+  }
+
+  async getOptimization(id: number): Promise<JDOptimizeResponse> {
+    const res = await fetch(`${API_BASE_URL}/resume/optimize/${id}`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error("Could not retrieve optimization record");
+    return res.json();
+  }
+
+  getOptimizedPdfUrl(optimizationId: number): string {
+    return `${API_BASE_URL}/resume/optimize/${optimizationId}/download/pdf`;
+  }
+
+  getOptimizedDocxUrl(optimizationId: number): string {
+    return `${API_BASE_URL}/resume/optimize/${optimizationId}/download/docx`;
+  }
+
+  async saveOptimizedResume(optimizationId: number, data: {
+    custom_title?: string;
+    template_id?: number;
+    set_as_active?: boolean;
+  }): Promise<{ message: string; resume_id: number; title: string; ats_score: number; pdf_url: string }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+
+    const res = await fetch(`${API_BASE_URL}/resume/optimize/${optimizationId}/save-as-resume`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to save optimized resume");
+    }
+    return res.json();
+  }
+
+  async prepareApplication(optimizationId: number): Promise<PreparedApplication> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    const res = await fetch(`${API_BASE_URL}/resume/optimize/${optimizationId}/prepare-application`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to prepare application");
+    }
+    return res.json();
+  }
+
+  async confirmApplication(optimizationId: number, data: { confirmed_fields?: Record<string, any>; user_acknowledged: boolean }): Promise<{ status: string; message: string; prepared_application: PreparedApplication }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+    const res = await fetch(`${API_BASE_URL}/resume/optimize/${optimizationId}/confirm-application`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to confirm application");
+    }
+    return res.json();
+  }
+
+  async getApplicationResumeSnapshot(applicationId: number): Promise<JDOptimizeResponse> {
+    const res = await fetch(`${API_BASE_URL}/applications/${applicationId}/resume-snapshot`, {
+      headers: getAuthHeaders(),
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Could not retrieve resume snapshot for this application");
+    }
+    return res.json();
+  }
+
+  async approveOptimization(optimizationId: number, data: { user_acknowledged: boolean; notes?: string; accepted_warnings?: string[] }): Promise<{ status: string; message: string; optimization_id: number; approved_at: string; approval_hash: string; optimization: JDOptimizeResponse }> {
+    const headers = getAuthHeaders() as Record<string, string>;
+    headers["Content-Type"] = "application/json";
+    const res = await fetch(`${API_BASE_URL}/resume/optimize/${optimizationId}/approve`, {
+      method: "POST",
+      headers,
+      credentials: "include",
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to approve optimization revision");
+    }
+    return res.json();
+  }
 }
 
 export const resumeCenterApi = new ResumeCenterApiService();
+

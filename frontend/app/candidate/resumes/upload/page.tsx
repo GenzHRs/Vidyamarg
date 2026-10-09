@@ -21,6 +21,141 @@ import { Card } from "@/components/ui/Card";
 import { Alert } from "@/components/ui/Alert";
 import { Badge } from "@/components/ui/Badge";
 
+function normalizeExtractedData(data: any): ComprehensiveExtractedProfile {
+  if (!data || typeof data !== "object") return {};
+  const pi = data.personal_info || {};
+  const ps = data.professional_summary || {};
+
+  const normalizedPi = {
+    ...pi,
+    full_name: pi.full_name || pi.name || "",
+    professional_title: pi.professional_title || pi.title || data.primary_designation || "",
+    email: pi.email || "",
+    phone: pi.phone || "",
+    location: pi.location || "",
+    linkedin_url: pi.linkedin_url || pi.linkedin || "",
+    github_url: pi.github_url || pi.github || "",
+    portfolio_url: pi.portfolio_url || pi.portfolio || "",
+  };
+
+  const normalizedPs = {
+    summary: typeof ps === "string" ? ps : (ps.summary || data.summary || ""),
+    career_objective: typeof ps === "object" ? (ps.career_objective || "") : "",
+    years_of_experience: typeof ps === "object" ? ps.years_of_experience : null,
+    areas_of_specialization: typeof ps === "object" ? (ps.areas_of_specialization || []) : [],
+  };
+
+  const rawSkills = data.skills || data.raw_skills || {};
+  const normalizedSkills: Record<string, string[]> = {};
+  if (typeof rawSkills === "object" && !Array.isArray(rawSkills)) {
+    const keyMap: Record<string, string> = {
+      "programming languages": "programming_languages",
+      "programming_languages": "programming_languages",
+      "frameworks & libraries": "frameworks_libraries",
+      "frameworks and libraries": "frameworks_libraries",
+      "frameworks_libraries": "frameworks_libraries",
+      "databases": "databases",
+      "databases & storage": "databases",
+      "cloud platforms & devops": "cloud_platforms",
+      "cloud & devops": "cloud_platforms",
+      "cloud platforms": "cloud_platforms",
+      "cloud_platforms": "cloud_platforms",
+      "developer tools": "developer_tools",
+      "developer_tools": "developer_tools",
+      "ai & machine learning": "ai_ml_technologies",
+      "ai and machine learning": "ai_ml_technologies",
+      "ai_ml_technologies": "ai_ml_technologies",
+      "soft skills & leadership": "soft_skills",
+      "soft skills": "soft_skills",
+      "core competencies": "soft_skills",
+      "soft_skills": "soft_skills",
+      "domain knowledge": "domain_knowledge",
+      "domain_knowledge": "domain_knowledge",
+      "other skills": "other_skills",
+      "other technologies": "other_skills",
+      "technical skills": "other_skills",
+      "other_skills": "other_skills",
+    };
+    for (const [k, v] of Object.entries(rawSkills)) {
+      if (Array.isArray(v)) {
+        normalizedSkills[k] = v;
+        const lowerK = k.toLowerCase().trim();
+        const mappedKey = keyMap[lowerK];
+        if (mappedKey) {
+          normalizedSkills[mappedKey] = v;
+        }
+      }
+    }
+  }
+
+  let workExp = data.work_experience || data.experience || [];
+  if (Array.isArray(workExp)) {
+    workExp = workExp.map((e: any) => ({
+      ...e,
+      employer: e.employer || e.company || "",
+      company: e.company || e.employer || "",
+      designation: e.designation || e.title || e.role || "",
+      title: e.title || e.designation || e.role || "",
+      employment_location: e.employment_location || e.location || "",
+      location: e.location || e.employment_location || "",
+      responsibilities: Array.isArray(e.responsibilities) ? e.responsibilities : (e.bullets || []),
+      bullets: Array.isArray(e.bullets) ? e.bullets : (e.responsibilities || []),
+    }));
+  }
+
+  let projs = data.projects || [];
+  if (Array.isArray(projs)) {
+    projs = projs.map((p: any) => {
+      let techs = p.technologies;
+      if (!techs && p.tech_stack) {
+        techs = typeof p.tech_stack === "string" ? p.tech_stack.split(",").map((s: string) => s.trim()) : p.tech_stack;
+      }
+      return {
+        ...p,
+        technologies: Array.isArray(techs) ? techs : [],
+        responsibilities: Array.isArray(p.responsibilities) ? p.responsibilities : (p.bullets || (p.description ? [p.description] : [])),
+      };
+    });
+  }
+
+  let edus = data.education || [];
+  if (Array.isArray(edus)) {
+    edus = edus.map((ed: any) => ({
+      ...ed,
+      institution: ed.institution || ed.university || "",
+      degree: ed.degree || "",
+      graduation_year: ed.graduation_year || ed.end_date || "",
+      grade: ed.grade || ed.gpa || "",
+    }));
+  }
+
+  let certs = data.certifications || [];
+  if (Array.isArray(certs)) {
+    certs = certs.map((c: any) => {
+      if (typeof c === "string") {
+        return { name: c, issuing_organization: "", issue_date: "" };
+      }
+      return {
+        ...c,
+        name: c.name || "Certification",
+        issuing_organization: c.issuing_organization || c.issuer || "",
+        issue_date: c.issue_date || "",
+      };
+    });
+  }
+
+  return {
+    ...data,
+    personal_info: normalizedPi,
+    professional_summary: normalizedPs,
+    skills: normalizedSkills as any,
+    work_experience: workExp,
+    projects: projs,
+    education: edus,
+    certifications: certs,
+  };
+}
+
 function ResumeUploadContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -71,7 +206,7 @@ function ResumeUploadContent() {
       resumeCenterApi.getExtraction(Number(resumeIdParam))
         .then((data) => {
           setCreatedResumeId(data.resume_id);
-          setExtractedData(data.structured_data || {});
+          setExtractedData(normalizeExtractedData(data.structured_data || {}));
           setRawText(data.raw_text || "");
           setConfidenceScore(data.confidence_score || 1.0);
           setWarnings(data.warnings || []);
@@ -158,7 +293,7 @@ function ResumeUploadContent() {
       await useResumeStore.getState().fetchActiveResume();
 
       setCreatedResumeId(res.resume_id);
-      setExtractedData(res.structured_data || {});
+      setExtractedData(normalizeExtractedData(res.structured_data || {}));
       setRawText(res.raw_text_preview || "");
       setConfidenceScore(res.confidence_score || 1.0);
       setWarnings(res.warnings || []);

@@ -313,6 +313,8 @@ class CareerAgentService:
                 exec_res = await tool_instance.execute(db, user_id, args)
                 status = exec_res.get("status", "success")
                 data = exec_res.get("data", {})
+                if status != "success":
+                    logger.warning(f"TOOL {tool_name} EXECUTION FAILED: {exec_res}")
                 step["status"] = "completed" if status == "success" else "failed"
 
                 executed_tools.append({
@@ -497,10 +499,13 @@ class CareerAgentService:
         if "get_recommended_jobs" in collected_data:
             jobs = collected_data["get_recommended_jobs"].get("recommended_jobs", [])
             count = len(jobs)
-            paragraphs.append(
-                f"I searched our live job catalog and matched **{count} roles** aligned with your profile. "
-                f"Your top match is **{jobs[0]['title']}** at **{jobs[0]['company']}** (**{jobs[0]['match_score']}% match**)."
-            )
+            if count > 0:
+                paragraphs.append(
+                    f"I searched our live job catalog and matched **{count} roles** aligned with your profile. "
+                    f"Your top match is **{jobs[0]['title']}** at **{jobs[0]['company']}** (**{jobs[0]['match_score']}% match**)."
+                )
+            else:
+                paragraphs.append("I searched our live job catalog. Check your profile settings or active resume to unlock personalized matches.")
         elif "search_jobs" in collected_data:
             jobs = collected_data["search_jobs"].get("jobs", [])
             paragraphs.append(f"I found **{len(jobs)} positions** matching your search criteria. Check the job cards below to review requirements or apply.")

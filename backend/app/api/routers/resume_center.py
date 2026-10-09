@@ -33,7 +33,8 @@ from app.models.models import User, Candidate
 from app.models.resume_center_models import (
     Resume, ResumeVersion, ResumeTemplate, JobDescription,
     ResumeExtraction, ResumeProfile, ResumeSkill, ResumeExperience,
-    ResumeEducation, ResumeProject, ResumeCertification, ResumeSection
+    ResumeEducation, ResumeProject, ResumeCertification, ResumeSection,
+    ResumeOptimization, ResumeOptimizationEvidence
 )
 from app.models.job_models import ResumeAIAnalysis
 from app.services.storage import storage_service, get_user_folder_name
@@ -41,6 +42,7 @@ from app.services.latex_service import (
     escape_latex, render_resume_to_latex, compile_latex_to_pdf, is_latex_installed,
     render_structured_data_to_pdf
 )
+from app.services.ats_optimizer import run_full_jd_optimization, generate_optimized_docx
 from app.services.resume_parser import (
     validate_resume_file, extract_text_from_file, parse_resume_to_structured
 )
@@ -341,6 +343,9 @@ def list_candidate_resumes(
             "latest_pdf_url": r.latest_pdf_url,
             "latest_tex_url": r.latest_tex_url,
             "status": r.status,
+            "is_active": bool(r.is_active or (candidate.active_resume_id == r.id)),
+            "is_verified": bool(r.is_verified),
+            "extraction_status": r.extraction_status,
             "created_at": r.created_at.isoformat() if r.created_at else None,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
         })
@@ -446,17 +451,25 @@ def convert_to_template_payload(extracted: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "personal_info": {
-            "full_name": pi.get("full_name") or "Candidate",
+            "full_name": pi.get("full_name") or pi.get("name") or "Candidate",
+            "professional_title": pi.get("professional_title") or pi.get("title") or "",
+            "title": pi.get("professional_title") or pi.get("title") or "",
             "email": pi.get("email") or "",
             "phone": pi.get("phone") or "",
             "location": pi.get("location") or "",
-            "linkedin": pi.get("linkedin_url") or "",
-            "github": pi.get("github_url") or "",
-            "portfolio": pi.get("portfolio_url") or ""
+            "linkedin": pi.get("linkedin_url") or pi.get("linkedin") or "",
+            "linkedin_url": pi.get("linkedin_url") or pi.get("linkedin") or "",
+            "github": pi.get("github_url") or pi.get("github") or "",
+            "github_url": pi.get("github_url") or pi.get("github") or "",
+            "portfolio": pi.get("portfolio_url") or pi.get("portfolio") or "",
+            "portfolio_url": pi.get("portfolio_url") or pi.get("portfolio") or ""
         },
         "summary": summary_text,
+        "professional_summary": ps if isinstance(ps, dict) else {"summary": summary_text},
         "skills": mapped_skills,
+        "raw_skills": skills_in,
         "experience": exp_list,
+        "work_experience": exp_list,
         "education": edu_list,
         "projects": proj_list,
         "certifications": certs_list,
@@ -894,11 +907,25 @@ async def upload_resume_file(
     return {
         "message": "Resume updated successfully. Your new resume is now the active resume.",
         "resume_id": resume.id,
+        "version_id": version.id,
+        "title": resume.title,
+        "file_name": filename,
+        "file_size": len(content),
+        "file_hash": file_hash,
+        "page_count": page_count,
+        "original_file_url": original_file_url,
+        "extraction_status": resume.extraction_status,
+        "confidence_score": structured_data.get("confidence_score", 1.0),
+        "missing_fields": structured_data.get("missing_fields", []),
+        "warnings": structured_data.get("extraction_warnings", []),
+        "raw_text_preview": raw_text[:2000],
+        "layout_info": layout_info,
         "active_resume_id": resume.id,
         "primary_designation": role_res.get("primary_designation"),
         "target_roles": role_res.get("target_roles", []),
         "role_evidence": role_res.get("role_evidence", []),
-        "structured_data": template_structured_data,
+        "structured_data": structured_data,
+        "template_compatible_data": template_structured_data,
         "is_active": True,
         "previous_resume_status": "archived"
     }
@@ -2135,4 +2162,596 @@ STRICT ANTI-HALLUCINATION RULES:
         "original": orig_text,
         "enhanced": enhanced
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JD-DRIVEN ATS RESUME OPTIMIZATION ENGINE ENDPOINTS (Rules 21, 22, 23, 24)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class JDOptimizeRequest(BaseModel):
+    resume_id: Optional[int] = Field(None, description="Candidate master resume ID. Defaults to active resume.")
+    job_description: str = Field(..., min_length=20, description="Full job description text to optimize against.")
+    template_id: Optional[int] = Field(None, description="Target LaTeX template ID.")
+    job_title: Optional[str] = Field(None, description="Target job title.")
+    company: Optional[str] = Field(None, description="Target company name.")
+    # Optional links to Job and Application entities for bidirectional tracking
+    job_id: Optional[int] = Field(None, description="Job entity ID from the jobs table (optional).")
+    application_id: Optional[int] = Field(None, description="Application entity ID to link this optimization to (optional).")
+    force_new: bool = Field(False, description="If True, create a new optimization even if an identical one (same jd_hash) already exists.")
+    # Mode selection: "template" (Mode A - choose a template) | "original_layout" (Mode B - edit uploaded original)
+    rendering_mode: Optional[str] = Field("template", description="Rendering mode: 'template' or 'original_layout'")
+
+
+@router.post("/resume/optimize")
+@router.post("/resumes/optimize")
+async def optimize_resume_for_job(
+    req: JDOptimizeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Executes the 10-step JD-driven ATS resume optimization engine:
+    - Idempotent: returns the existing optimization if the same (candidate, master_resume, JD) triple
+      already has a saved record (same jd_hash), unless force_new=True.
+    - Stores optimization as structured JSON snapshot — does NOT generate a PDF file.
+    - PDF/DOCX are generated on-demand at download time from the saved snapshot.
+    - Master Resume is never modified.
+    """
+    from app.services.resume_snapshot_service import (
+        compute_jd_hash, compute_content_hash, find_existing_optimization, build_optimization_response
+    )
+
+    cand = _get_or_create_candidate(current_user, db)
+
+    # 1. Resolve Master Resume
+    if req.resume_id:
+        master_resume = db.query(Resume).filter(
+            Resume.id == req.resume_id,
+            Resume.candidate_id == cand.id,
+            Resume.deleted_at == None
+        ).first()
+        if not master_resume:
+            raise HTTPException(status_code=404, detail="Master resume not found")
+    else:
+        # Resolve active resume
+        master_resume = None
+        if cand.active_resume_id:
+            master_resume = db.query(Resume).filter(
+                Resume.id == cand.active_resume_id,
+                Resume.candidate_id == cand.id,
+                Resume.deleted_at == None
+            ).first()
+        if not master_resume:
+            master_resume = db.query(Resume).filter(
+                Resume.candidate_id == cand.id,
+                Resume.is_active == True,
+                Resume.deleted_at == None
+            ).order_by(Resume.updated_at.desc()).first()
+        if not master_resume:
+            master_resume = db.query(Resume).filter(
+                Resume.candidate_id == cand.id,
+                Resume.deleted_at == None
+            ).order_by(Resume.updated_at.desc()).first()
+
+    if not master_resume:
+        raise HTTPException(
+            status_code=400,
+            detail="No candidate resume found. Please upload or create a master resume first."
+        )
+
+    # 2. Idempotency check — reuse existing record if JD hash matches
+    jd_hash = compute_jd_hash(req.job_description)
+    if not req.force_new:
+        existing_opt = find_existing_optimization(
+            db, cand.id, master_resume.id, jd_hash
+        )
+        if existing_opt:
+            logger.info(
+                f"Idempotency hit: reusing optimization {existing_opt.id} "
+                f"for candidate {cand.id} / resume {master_resume.id}"
+            )
+            # If caller provided application_id, link them now (idempotent)
+            if req.application_id and existing_opt.application_id != req.application_id:
+                from app.services.resume_snapshot_service import link_optimization_to_application
+                try:
+                    link_optimization_to_application(
+                        db, existing_opt.id, req.application_id, cand.id, commit=True
+                    )
+                    db.refresh(existing_opt)
+                except Exception:
+                    pass  # Non-fatal: linking is best-effort
+            return build_optimization_response(existing_opt)
+
+    # 3. Extract Master Structured Data (IMMUTABLE source — never modified)
+    latest_version = db.query(ResumeVersion).filter(
+        ResumeVersion.resume_id == master_resume.id
+    ).order_by(ResumeVersion.version_number.desc()).first()
+
+    master_data = latest_version.structured_data if (latest_version and latest_version.structured_data) else {}
+    if not master_data:
+        master_data = _build_structured_data_from_models(master_resume)
+
+    if not master_data:
+        raise HTTPException(
+            status_code=400,
+            detail="Master resume has no structured data available for ATS optimization."
+        )
+
+    # 4. Execute Master Optimization Engine (LLM call — only here, never at download/reopen)
+    opt_result = run_full_jd_optimization(
+        master_resume_data=master_data,
+        job_description_text=req.job_description,
+        job_title=req.job_title,
+        company=req.company
+    )
+
+    # 5. Compute content hash for render cache key
+    content_hash = compute_content_hash(opt_result.optimized_resume)
+
+    # 6. Determine template version
+    tmpl_version = None
+    if req.template_id:
+        tmpl = db.query(ResumeTemplate).filter(ResumeTemplate.id == req.template_id).first()
+        if tmpl:
+            tmpl_version = f"v{tmpl.id}"
+
+    # 7. Store Job Description in DB
+    jd_record = JobDescription(
+        candidate_id=cand.id,
+        title=opt_result.job_title,
+        company=opt_result.company,
+        raw_text=req.job_description,
+        extracted_requirements={
+            "required_skills": opt_result.parsed_jd.required_skills,
+            "preferred_skills": opt_result.parsed_jd.preferred_skills,
+            "responsibilities": opt_result.parsed_jd.responsibilities,
+            "seniority": opt_result.parsed_jd.seniority
+        }
+    )
+    db.add(jd_record)
+    db.flush()
+
+    # 8. Determine Optimization Version (per-candidate-resume count)
+    prior_opts_count = db.query(ResumeOptimization).filter(
+        ResumeOptimization.master_resume_id == master_resume.id,
+        ResumeOptimization.candidate_id == cand.id
+    ).count()
+
+    # 9. Store ResumeOptimization Record (structured JSON snapshot only — no PDF stored)
+    ats_report_payload = opt_result.ats_scores.model_dump()
+    ats_report_payload["resume_match_score"] = opt_result.resume_match_score
+    ats_report_payload["score_breakdown"] = opt_result.score_breakdown
+    ats_report_payload["score_explanation"] = opt_result.score_explanation.model_dump()
+    ats_report_payload["skill_gaps"] = opt_result.skill_gaps.model_dump()
+    ats_report_payload["application_readiness"] = opt_result.application_readiness.model_dump()
+    ats_report_payload["prepared_application"] = opt_result.prepared_application.model_dump()
+
+    # Determine mode & fidelity tier
+    req_mode = (req.rendering_mode or "template").lower()
+    fidelity = "template_fallback"
+    if req_mode == "original_layout":
+        if (master_resume.file_type or "").upper() == "DOCX" or (master_resume.file_name or "").lower().endswith(".docx"):
+            fidelity = "original_layout_preserved"
+        elif (master_resume.file_type or "").upper() == "PDF" or (master_resume.file_name or "").lower().endswith(".pdf"):
+            fidelity = "reconstructed_from_original"
+        else:
+            fidelity = "template_fallback"
+
+    opt_record = ResumeOptimization(
+        candidate_id=cand.id,
+        master_resume_id=master_resume.id,
+        job_description_id=jd_record.id,
+        job_id=req.job_id,
+        application_id=req.application_id,
+        template_id=req.template_id,
+        template_version=tmpl_version,
+        rendering_mode=req_mode,
+        fidelity_tier=fidelity,
+        optimization_version=prior_opts_count + 1,
+        jd_hash=jd_hash,
+        content_hash=content_hash,
+        ats_score=opt_result.ats_scores.overall_ats_score,
+        keyword_score=opt_result.ats_scores.keyword_match,
+        experience_score=opt_result.ats_scores.experience_match,
+        technical_score=opt_result.ats_scores.technical_match,
+        responsibility_score=opt_result.ats_scores.responsibility_match,
+        alignment_score=opt_result.ats_scores.alignment_score,
+        quality_score=opt_result.ats_scores.quality_score,
+        truthfulness_score=opt_result.truthfulness_score,
+        job_title=opt_result.job_title,
+        company=opt_result.company,
+        optimized_data=opt_result.optimized_resume,
+        matched_skills=opt_result.ats_scores.matched_skills,
+        partial_matches=opt_result.ats_scores.partial_matches,
+        missing_skills=opt_result.ats_scores.missing_skills,
+        recommendations=opt_result.ats_scores.recommendations,
+        ats_report=ats_report_payload
+    )
+    db.add(opt_record)
+    db.flush()
+
+    # 10. Store Evidence Mapping Items
+    for ev in opt_result.evidence_matches:
+        db.add(ResumeOptimizationEvidence(
+            optimization_id=opt_record.id,
+            jd_requirement=ev.jd_requirement,
+            candidate_evidence=ev.candidate_evidence,
+            match_type=ev.match_type,
+            confidence=ev.confidence,
+            category=ev.category
+        ))
+
+    # 11. If application_id supplied, link Application.optimization_id → this record
+    if req.application_id:
+        from app.models.job_models import Application as ApplicationModel
+        app_rec = db.query(ApplicationModel).filter(
+            ApplicationModel.id == req.application_id,
+            ApplicationModel.candidate_id == cand.id
+        ).first()
+        if app_rec:
+            app_rec.optimization_id = opt_record.id
+
+    db.commit()
+    db.refresh(opt_record)
+
+    return build_optimization_response(opt_record)
+
+
+@router.get("/resume/optimize/{optimization_id}")
+@router.get("/resumes/optimize/{optimization_id}")
+def get_resume_optimization(
+    optimization_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves a saved resume optimization record with evidence mapping.
+    Deterministic read: does NOT re-run any LLM or optimizer.
+    """
+    from app.services.resume_snapshot_service import get_optimization_by_id, build_optimization_response
+
+    cand = _get_or_create_candidate(current_user, db)
+    opt = get_optimization_by_id(db, optimization_id, cand.id)
+    return build_optimization_response(opt)
+
+
+@router.get("/applications/{application_id}/resume-snapshot")
+@router.get("/job-agent/applications/{application_id}/resume-snapshot")
+def get_application_resume_snapshot(
+    application_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retrieves the exact saved resume snapshot used for this specific application.
+    Tenant isolated: Candidate A cannot access Candidate B's application or resume snapshot.
+    Deterministic read: Reopening an application does NOT trigger a new LLM optimization.
+    """
+    from app.services.resume_snapshot_service import get_optimization_for_application, build_optimization_response
+
+    cand = _get_or_create_candidate(current_user, db)
+    opt = get_optimization_for_application(db, application_id, cand.id)
+    if not opt:
+        raise HTTPException(
+            status_code=404,
+            detail="No resume optimization snapshot linked to this application."
+        )
+    return build_optimization_response(opt)
+
+
+class ConfirmApplicationRequest(BaseModel):
+    confirmed_fields: Dict[str, Any] = Field(default_factory=dict)
+    user_acknowledged: bool = Field(..., description="Explicit acknowledgement by the user.")
+
+
+class ApproveOptimizationRequest(BaseModel):
+    user_acknowledged: bool = Field(..., description="Explicit approval by candidate.")
+    notes: Optional[str] = Field(None, description="Optional candidate approval notes.")
+    accepted_warnings: List[str] = Field(default_factory=list, description="List of accepted layout/evidence warnings.")
+
+
+@router.post("/resume/optimize/{optimization_id}/approve")
+@router.post("/resumes/optimize/{optimization_id}/approve")
+def approve_optimization_endpoint(
+    optimization_id: int,
+    payload: ApproveOptimizationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Explicit Candidate Approval Gate:
+    Records that the candidate reviewed and explicitly approved this specific optimization revision
+    and its rendered artifact/content before platform-managed submission or prepared-application linking.
+    """
+    from app.services.resume_snapshot_service import get_optimization_by_id, build_optimization_response
+
+    if not payload.user_acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="Candidate approval must be explicitly acknowledged."
+        )
+
+    cand = _get_or_create_candidate(current_user, db)
+    opt = get_optimization_by_id(db, optimization_id, cand.id)
+
+    opt.candidate_approved = True
+    opt.approved_at = datetime.utcnow()
+    opt.approval_hash = opt.content_hash
+    opt.approval_notes = payload.notes
+    db.commit()
+    db.refresh(opt)
+
+    return {
+        "status": "APPROVED",
+        "message": f"Optimization revision #{opt.optimization_version} explicitly approved by candidate.",
+        "optimization_id": opt.id,
+        "approved_at": opt.approved_at.isoformat(),
+        "approval_hash": opt.approval_hash,
+        "optimization": build_optimization_response(opt)
+    }
+
+
+
+@router.post("/resume/optimize/{optimization_id}/prepare-application")
+@router.post("/resumes/optimize/{optimization_id}/prepare-application")
+def prepare_application_endpoint(
+    optimization_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Prepares structured form autofill fields for candidate review.
+    Categorizes fields into EXACT_FIELD, SEMANTIC_FIELD, and MISSING_INFORMATION.
+    Strictly forbids autonomous submission.
+    """
+    cand = _get_or_create_candidate(current_user, db)
+    opt = db.query(ResumeOptimization).filter(
+        ResumeOptimization.id == optimization_id,
+        ResumeOptimization.candidate_id == cand.id
+    ).first()
+    if not opt:
+        raise HTTPException(status_code=404, detail="Optimization record not found")
+
+    report = opt.ats_report or {}
+    prepared_app = report.get("prepared_application")
+    if not prepared_app:
+        from app.services.ats_optimizer import parse_job_description, prepare_application_draft
+        master_resume = db.query(Resume).filter(Resume.id == opt.master_resume_id).first()
+        master_data = _build_structured_data_from_models(master_resume) if master_resume else {}
+        parsed_jd = parse_job_description(opt.job_description.raw_text if opt.job_description else "", override_title=opt.job_title, override_company=opt.company)
+        draft = prepare_application_draft(master_data, parsed_jd, opt.optimized_data)
+        prepared_app = draft.model_dump()
+        report["prepared_application"] = prepared_app
+        opt.ats_report = report
+        db.commit()
+
+    return prepared_app
+
+
+@router.post("/resume/optimize/{optimization_id}/confirm-application")
+@router.post("/resumes/optimize/{optimization_id}/confirm-application")
+def confirm_application_endpoint(
+    optimization_id: int,
+    payload: ConfirmApplicationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    User review step for application form data:
+    1. Transitions status to CONFIRMED.
+    2. Marks the ResumeOptimization record as submitted and immutable (locks it from mutation).
+    3. Preserves the exact submitted document artifact in private cloud storage.
+    4. If application_id is linked, records submitted state.
+    """
+    from app.services.resume_snapshot_service import (
+        get_optimization_by_id, render_pdf_from_snapshot,
+        preserve_submitted_artifact, lock_optimization_as_submitted
+    )
+
+    if not payload.user_acknowledged:
+        raise HTTPException(
+            status_code=400,
+            detail="Application cannot be confirmed without explicit user review and acknowledgment."
+        )
+
+    cand = _get_or_create_candidate(current_user, db)
+    opt = get_optimization_by_id(db, optimization_id, cand.id)
+
+    # 1. Update ATS report prepared_application status
+    report = opt.ats_report or {}
+    prepared_app = report.get("prepared_application", {})
+    prepared_app["status"] = "CONFIRMED"
+    prepared_app["requires_user_confirmation"] = False
+    prepared_app["confirmed_at"] = datetime.utcnow().isoformat()
+    prepared_app["confirmed_by_user"] = True
+    prepared_app["submission_allowed"] = False
+    report["prepared_application"] = prepared_app
+    opt.ats_report = report
+
+    # 2. Render and preserve exact submitted artifact in private storage
+    artifact_url = opt.submitted_artifact_url
+    if not artifact_url:
+        try:
+            pdf_bytes = render_pdf_from_snapshot(opt, db, cand.id)
+            user_folder = get_user_folder_name(current_user)
+            artifact_url = preserve_submitted_artifact(
+                db=db,
+                opt=opt,
+                candidate_id=cand.id,
+                pdf_bytes=pdf_bytes,
+                user_folder=user_folder,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to preserve submitted artifact for opt {opt.id}: {e}")
+
+    # 3. Lock optimization as submitted and immutable
+    lock_optimization_as_submitted(
+        db=db,
+        optimization_id=opt.id,
+        candidate_id=cand.id,
+        artifact_url=artifact_url,
+        commit=True
+    )
+
+    return {
+        "status": "CONFIRMED",
+        "message": "Application draft reviewed and confirmed by candidate. Submitted resume snapshot is preserved and locked.",
+        "is_submitted": True,
+        "is_immutable": True,
+        "submitted_artifact_url": opt.submitted_artifact_url,
+        "prepared_application": prepared_app
+    }
+
+
+@router.get("/resume/optimize/{optimization_id}/download/pdf")
+@router.get("/resumes/optimize/{optimization_id}/download/pdf")
+def download_optimized_resume_pdf(
+    optimization_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Generates and downloads a clean ATS-formatted PDF of the optimized resume.
+    Deterministic: Renders on demand from saved structured JSON without calling LLM.
+    If already submitted, serves the preserved submitted artifact.
+    """
+    from app.services.resume_snapshot_service import get_optimization_by_id, render_pdf_from_snapshot
+
+    cand = _get_or_create_candidate(current_user, db)
+    opt = get_optimization_by_id(db, optimization_id, cand.id)
+
+    pdf_bytes = render_pdf_from_snapshot(opt, db, cand.id)
+    safe_title = re.sub(r'[^a-zA-Z0-9_-]', '_', opt.job_title or 'Optimized_Resume')
+    filename = f"Resume_{safe_title}_ATS{opt.ats_score}.pdf"
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-cache, max-age=0"
+        }
+    )
+
+
+@router.get("/resume/optimize/{optimization_id}/download/docx")
+@router.get("/resumes/optimize/{optimization_id}/download/docx")
+def download_optimized_resume_docx(
+    optimization_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Generates and downloads an ATS-formatted Microsoft Word (.docx) of the optimized resume.
+    Deterministic: Renders on demand from saved structured JSON without calling LLM.
+    """
+    from app.services.resume_snapshot_service import get_optimization_by_id, render_docx_from_snapshot
+
+    cand = _get_or_create_candidate(current_user, db)
+    opt = get_optimization_by_id(db, optimization_id, cand.id)
+
+    docx_bytes = render_docx_from_snapshot(opt, cand.id)
+    safe_title = re.sub(r'[^a-zA-Z0-9_-]', '_', opt.job_title or 'Optimized_Resume')
+    filename = f"Resume_{safe_title}_ATS{opt.ats_score}.docx"
+
+    return Response(
+        content=docx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-cache"
+        }
+    )
+
+
+class SaveOptimizedResumeRequest(BaseModel):
+    custom_title: Optional[str] = None
+    template_id: Optional[int] = None
+    set_as_active: bool = False
+
+
+@router.post("/resume/optimize/{optimization_id}/save-as-resume")
+@router.post("/resumes/optimize/{optimization_id}/save-as-resume")
+async def save_optimized_as_resume(
+    optimization_id: int,
+    req: SaveOptimizedResumeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Saves an optimized resume analysis as a new derived resume in candidate's repository.
+    Strictly preserves the Master Resume without modifying it.
+    """
+    cand = _get_or_create_candidate(current_user, db)
+    opt = db.query(ResumeOptimization).filter(
+        ResumeOptimization.id == optimization_id,
+        ResumeOptimization.candidate_id == cand.id
+    ).first()
+    if not opt:
+        raise HTTPException(status_code=404, detail="Optimization record not found")
+
+    title = req.custom_title or f"ATS Optimized — {opt.job_title} ({opt.company or 'Target'})"
+
+    # Create new derived resume
+    new_resume = Resume(
+        candidate_id=cand.id,
+        title=title,
+        source_type="tailored",
+        template_id=req.template_id or opt.template_id,
+        is_active=req.set_as_active,
+        status="active" if req.set_as_active else "tailored",
+        extraction_status="verified",
+        is_verified=True
+    )
+    db.add(new_resume)
+    db.flush()
+
+    # Create initial version
+    version = ResumeVersion(
+        resume_id=new_resume.id,
+        version_number=1,
+        structured_data=opt.optimized_data,
+        change_summary=f"Derived ATS optimization for {opt.job_title} at {opt.company}. ATS Score: {opt.ats_score}/100.",
+        created_by=current_user.id
+    )
+    db.add(version)
+    db.flush()
+
+    new_resume.current_version_id = version.id
+
+    # If requested as active, archive previous active
+    if req.set_as_active:
+        cand.active_resume_id = new_resume.id
+        db.query(Resume).filter(
+            Resume.candidate_id == cand.id,
+            Resume.id != new_resume.id,
+            Resume.is_active == True
+        ).update({"is_active": False, "status": "archived"})
+
+    # Compile PDF
+    pdf_bytes = render_structured_data_to_pdf(opt.optimized_data)
+    user_folder = get_user_folder_name(current_user)
+    pdf_filename = f"optimized_{new_resume.id}_v1.pdf"
+    pdf_url = storage_service.upload_file(
+        folder=f"{user_folder}/resumes",
+        filename=pdf_filename,
+        content=pdf_bytes,
+        mime_type="application/pdf"
+    )
+
+    new_resume.latest_pdf_url = pdf_url
+    version.pdf_file_url = pdf_url
+
+    db.commit()
+    db.refresh(new_resume)
+
+    return {
+        "message": "Optimized resume saved successfully as a new derived resume.",
+        "resume_id": new_resume.id,
+        "title": new_resume.title,
+        "is_active": new_resume.is_active,
+        "ats_score": opt.ats_score,
+        "pdf_url": pdf_url
+    }
+
 

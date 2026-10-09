@@ -781,7 +781,10 @@ def _parse_heuristic_experience(exp_lines: List[str]) -> List[Dict[str, Any]]:
             else:
                 curr_job["responsibilities"].append(clean_text)
         else:
-            if curr_job["employer"] == "Company" or curr_job["designation"] == "Role":
+            if any(k in clean_text.lower() for k in ("india", "usa", "us", "uk", "hyderabad", "bangalore", "bengaluru", "mumbai", "delhi", "pune", "chennai", "noida", "gurgaon", "guntur", "andhra", "remote", "hybrid", "onsite", "california", "new york", "london", "singapore", "ca", "ny", "tx", "wa")) or ("," in clean_text and len(clean_text.split()) <= 4 and not clean_text.endswith(".")):
+                if not curr_job.get("employment_location"):
+                    curr_job["employment_location"] = clean_text
+            elif curr_job["employer"] == "Company" or curr_job["designation"] == "Role":
                 emp, des = _extract_company_and_designation(clean_text)
                 if emp != "Company":
                     curr_job["employer"] = emp
@@ -1041,7 +1044,7 @@ def heuristic_comprehensive_parse(raw_text: str) -> Dict[str, Any]:
         "skills": re.compile(r"^(technical\s+skills|skills|core\s+competencies|technologies|tools\s+&\s+technologies|skills\s+&\s+abilities|key\s+skills)", re.I),
         "projects": re.compile(r"^(projects|key\s+projects|featured\s+projects|personal\s+projects|academic\s+projects)", re.I),
         "education": re.compile(r"^(education|academic\s+background|academics|qualifications|educational\s+qualifications)", re.I),
-        "certifications": re.compile(r"^(certifications?|licenses?|courses?|professional\s+certifications?|trainings?)", re.I),
+        "certifications": re.compile(r"^(certifications?|licenses?|courses?|professional\s+certifications?|trainings?|awards?\s*(?:&|and)\s*certifications?|certifications?\s*(?:&|and)\s*awards?)", re.I),
         "achievements": re.compile(r"^(achievements?|awards?|honors?|extracurricular(\s+activities)?)", re.I),
         "languages": re.compile(r"^(languages?|spoken\s+languages?)", re.I)
     }
@@ -1287,6 +1290,26 @@ def heuristic_comprehensive_parse(raw_text: str) -> Dict[str, Any]:
                 "original_content": content_txt,
                 "structured_content": c_lines
             })
+
+    # 6. Fallback candidate location if header didn't specify it
+    if not structured["personal_info"].get("location"):
+        for job in structured.get("work_experience", []):
+            if job.get("employment_location"):
+                structured["personal_info"]["location"] = job["employment_location"]
+                loc_parts = [lp.strip() for lp in job["employment_location"].split(",")]
+                structured["personal_info"]["city"] = loc_parts[0]
+                if len(loc_parts) > 1:
+                    structured["personal_info"]["state"] = loc_parts[1]
+                break
+        if not structured["personal_info"].get("location"):
+            for edu in structured.get("education", []):
+                if edu.get("location"):
+                    structured["personal_info"]["location"] = edu["location"]
+                    loc_parts = [lp.strip() for lp in edu["location"].split(",")]
+                    structured["personal_info"]["city"] = loc_parts[0]
+                    if len(loc_parts) > 1:
+                        structured["personal_info"]["state"] = loc_parts[1]
+                    break
 
     return _normalize_and_validate_extraction(structured, raw_text)
 

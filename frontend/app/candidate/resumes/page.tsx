@@ -93,9 +93,21 @@ export default function ResumeCenterDashboard() {
         (r.template_name && r.template_name.toLowerCase().includes(searchQuery.toLowerCase())) ||
         r.source_type.toLowerCase().includes(searchQuery.toLowerCase());
       
-      const matchesStatus =
-        statusFilter === "all" ||
-        r.status.toLowerCase() === statusFilter.toLowerCase();
+      let matchesStatus = true;
+      if (statusFilter === "active") {
+        matchesStatus = Boolean(r.is_active || r.status?.toLowerCase() === "active");
+      } else if (statusFilter === "tailored") {
+        matchesStatus = r.source_type === "tailored" || r.status?.toLowerCase() === "tailored";
+      } else if (statusFilter === "compiled") {
+        matchesStatus = Boolean(r.latest_pdf_url) || r.status?.toLowerCase() === "compiled";
+      } else if (statusFilter === "archived") {
+        matchesStatus = r.status?.toLowerCase() === "archived";
+      } else if (statusFilter === "draft") {
+        const isAct = Boolean(r.is_active || r.status?.toLowerCase() === "active");
+        const isComp = Boolean(r.latest_pdf_url) || r.status?.toLowerCase() === "compiled";
+        const isTail = r.source_type === "tailored" || r.status?.toLowerCase() === "tailored";
+        matchesStatus = !isAct && !isComp && !isTail && r.status?.toLowerCase() !== "archived";
+      }
 
       return matchesSearch && matchesStatus;
     });
@@ -173,17 +185,28 @@ export default function ResumeCenterDashboard() {
     }
   };
 
-  const getStatusBadge = (status: string) => {
-    const s = status.toUpperCase();
-    if (s === "COMPILED") {
+  const getStatusBadge = (resume: ResumeItem) => {
+    const s = (resume.status || "").toUpperCase();
+    const isAct = Boolean(resume.is_active || s === "ACTIVE");
+
+    if (isAct) {
+      if (resume.source_type === "tailored") {
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+            <Sparkles size={12} />
+            Active • Tailored
+          </span>
+        );
+      }
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
           <CheckCircle2 size={12} />
-          Compiled
+          Active
         </span>
       );
     }
-    if (s === "TAILORED") {
+
+    if (resume.source_type === "tailored" || s === "TAILORED") {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
           <Sparkles size={12} />
@@ -191,14 +214,33 @@ export default function ResumeCenterDashboard() {
         </span>
       );
     }
-    if (s === "PARSED") {
+
+    if (s === "COMPILED" || resume.latest_pdf_url) {
       return (
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
           <FileText size={12} />
-          Parsed
+          Compiled
         </span>
       );
     }
+
+    if (s === "ARCHIVED") {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border border-slate-200 dark:border-slate-700">
+          Archived
+        </span>
+      );
+    }
+
+    if (s === "VERIFIED" || resume.is_verified) {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+          <CheckCircle2 size={12} />
+          Verified
+        </span>
+      );
+    }
+
     return (
       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
         <Clock size={12} />
@@ -491,9 +533,10 @@ export default function ResumeCenterDashboard() {
               className="py-1.5 px-3 text-xs rounded-xl border border-app-border bg-app-surface text-app-text focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="all">All Statuses</option>
+              <option value="active">Active</option>
               <option value="compiled">Compiled</option>
-              <option value="tailored">Tailored</option>
-              <option value="parsed">Parsed</option>
+              <option value="tailored">JD Tailored</option>
+              <option value="archived">Archived</option>
               <option value="draft">Draft</option>
             </select>
 
@@ -599,7 +642,7 @@ export default function ResumeCenterDashboard() {
                         </div>
                       </td>
                       <td className="py-4 px-4">
-                        {getStatusBadge(resume.status)}
+                        {getStatusBadge(resume)}
                       </td>
                       <td className="py-4 px-4 text-app-text-muted">
                         {resume.updated_at 

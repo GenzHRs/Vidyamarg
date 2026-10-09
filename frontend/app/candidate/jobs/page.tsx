@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiService } from "@/services/api";
@@ -25,6 +25,9 @@ import {
   Building2,
   SlidersHorizontal,
   X,
+  Target,
+  Sparkles,
+  Check,
 } from "lucide-react";
 
 interface Job {
@@ -43,6 +46,8 @@ interface Job {
   application_url?: string;
   posted_date?: string;
   source?: string;
+  role_category?: string;
+  industry?: string;
 }
 
 function isValidUrl(url?: string): boolean {
@@ -106,10 +111,20 @@ function JobCard({
             {hasResume && job.match_score !== undefined && job.match_score !== null && job.match_score > 0 && (
               <MatchBadge score={job.match_score} />
             )}
+            {hasResume && job.match_score !== undefined && job.match_score >= 70 && (
+              <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border border-purple-200/60 dark:border-purple-800/40">
+                <Target size={10} /> Target Role Match
+              </span>
+            )}
           </div>
           <p className="text-xs text-app-text-muted font-medium">{job.company}</p>
 
           <div className="flex flex-wrap items-center gap-3 mt-2 text-[11px] text-app-text-muted">
+            {job.role_category && (
+              <span className="px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border border-blue-200/50 dark:border-blue-800/40 text-[10px] font-medium">
+                {job.role_category}
+              </span>
+            )}
             {job.location && (
               <span className="flex items-center gap-1">
                 <MapPin size={10} /> {job.location}
@@ -220,9 +235,10 @@ function JobCard({
 export default function JobsPage() {
   const searchParams = useSearchParams();
   const roleParam = searchParams.get("role") || "";
-  const { activeResume, primaryDesignation, targetRoles, fetchActiveResume } = useResumeStore();
+  const { activeResume, primaryDesignation, targetRoles, structuredData, fetchActiveResume } = useResumeStore();
 
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const [recommendedJobs, setRecommendedJobs] = useState<Job[]>([]);
+  const [allCatalogJobs, setAllCatalogJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hasResume, setHasResume] = useState<boolean | null>(null);
@@ -230,8 +246,32 @@ export default function JobsPage() {
   const [search, setSearch] = useState(roleParam);
   const [locationFilter, setLocationFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("All");
+  const [domainFilter, setDomainFilter] = useState("All Domains");
   const [savedJobs, setSavedJobs] = useState<Set<string | number>>(new Set());
   const [activeTab, setActiveTab] = useState<"recommended" | "all" | "saved">("recommended");
+
+  // Show only based on target roles or skills (default true)
+  const [onlyTargetRolesAndSkills, setOnlyTargetRolesAndSkills] = useState(true);
+  const [selectedTargetRole, setSelectedTargetRole] = useState<string>("All My Roles");
+  const [selectedSkill, setSelectedSkill] = useState<string>("All Skills");
+
+  // Extract flat list of candidate skills from structuredData
+  const candidateSkills = useMemo(() => {
+    if (!structuredData?.skills) return [];
+    if (Array.isArray(structuredData.skills)) return structuredData.skills as string[];
+    if (typeof structuredData.skills === "object") {
+      const all: string[] = [];
+      for (const val of Object.values(structuredData.skills)) {
+        if (Array.isArray(val)) {
+          all.push(...(val as string[]));
+        } else if (typeof val === "string") {
+          all.push(val);
+        }
+      }
+      return Array.from(new Set(all));
+    }
+    return [];
+  }, [structuredData]);
 
   const fetchJobs = useCallback(async () => {
     setLoading(true);
@@ -240,11 +280,14 @@ export default function JobsPage() {
       const resumes = await apiService.getResumes().catch(() => []);
       setHasResume(Array.isArray(resumes) && resumes.length > 0);
 
-      const res = await apiService.getRecommendedJobs();
-      setJobs(Array.isArray(res) ? res : []);
+      const [recRes, allRes] = await Promise.all([
+        apiService.getRecommendedJobs().catch(() => []),
+        apiService.getAllJobs().catch(() => []),
+      ]);
+      setRecommendedJobs(Array.isArray(recRes) ? recRes : []);
+      setAllCatalogJobs(Array.isArray(allRes) ? allRes : []);
     } catch (e: any) {
       setError("Unable to load jobs right now. Please try again.");
-      setJobs([]);
     } finally {
       setLoading(false);
     }
@@ -265,22 +308,120 @@ export default function JobsPage() {
     // TODO: persist to backend
   };
 
-  const filteredJobs = jobs.filter((j) => {
-    const matchesSearch =
-      !search ||
-      j.title.toLowerCase().includes(search.toLowerCase()) ||
-      j.company.toLowerCase().includes(search.toLowerCase());
-    const matchesLocation =
-      !locationFilter ||
-      (j.location || "").toLowerCase().includes(locationFilter.toLowerCase());
-    const matchesType =
-      typeFilter === "All" || j.employment_type === typeFilter;
-    return matchesSearch && matchesLocation && matchesType;
-  });
+  const isMatchingProfile = useCallback(
+    (j: Job, roleFilter: string, skillFilter: string): boolean => {
+      const titleLower = j.title.toLowerCase();
+      const catLower = (j.role_category || "").toLowerCase();
+      const descLower = (j.description || "").toLowerCase();
+
+      // If specific role is selected
+      if (roleFilter !== "All My Roles") {
+        const words = roleFilter
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((w) => w.length > 2 && !["and", "the", "for", "with"].includes(w));
+        const matchesRole = words.some((w) => titleLower.includes(w) || catLower.includes(w));
+        if (!matchesRole) return false;
+      }
+
+      // If specific skill is selected
+      if (skillFilter !== "All Skills") {
+        const skLower = skillFilter.toLowerCase();
+        const matchesSkill =
+          (j.required_skills && j.required_skills.some((s) => s.toLowerCase() === skLower)) ||
+          (j.matched_skills && j.matched_skills.some((s) => s.toLowerCase().includes(skLower))) ||
+          titleLower.includes(skLower) ||
+          descLower.includes(skLower);
+        if (!matchesSkill) return false;
+      }
+
+      // If backend calculated overall_score >= 50, it passed target role or skill threshold
+      if (j.match_score !== undefined && j.match_score !== null && j.match_score >= 50) {
+        return true;
+      }
+
+      // Check against candidate target roles
+      if (targetRoles && targetRoles.length > 0) {
+        const matchesAnyRole = targetRoles.some((tr) => {
+          const words = tr
+            .toLowerCase()
+            .split(/\s+/)
+            .filter((w) => w.length > 2 && !["and", "the", "for", "with"].includes(w));
+          return words.some((w) => titleLower.includes(w) || catLower.includes(w));
+        });
+        if (matchesAnyRole) return true;
+      }
+
+      // Check against candidate primary designation
+      if (primaryDesignation) {
+        const words = primaryDesignation
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((w) => w.length > 2 && !["and", "the", "for", "with"].includes(w));
+        if (words.some((w) => titleLower.includes(w) || catLower.includes(w))) return true;
+      }
+
+      // Check against candidate skills
+      if (candidateSkills.length > 0) {
+        const candSet = new Set(candidateSkills.map((s) => s.toLowerCase()));
+        if (j.required_skills && j.required_skills.some((rs) => candSet.has(rs.toLowerCase()))) {
+          return true;
+        }
+        if (j.matched_skills && j.matched_skills.length > 0) {
+          return true;
+        }
+      }
+
+      return false;
+    },
+    [targetRoles, primaryDesignation, candidateSkills]
+  );
+
+  const currentFeedJobs = activeTab === "recommended" ? recommendedJobs : allCatalogJobs;
+
+  const filteredJobs = useMemo(() => {
+    return currentFeedJobs.filter((j) => {
+      const matchesSearch =
+        !search ||
+        j.title.toLowerCase().includes(search.toLowerCase()) ||
+        j.company.toLowerCase().includes(search.toLowerCase());
+      const matchesLocation =
+        !locationFilter ||
+        (j.location || "").toLowerCase().includes(locationFilter.toLowerCase());
+      const matchesType =
+        typeFilter === "All" ||
+        (j.employment_type && j.employment_type.toLowerCase() === typeFilter.toLowerCase()) ||
+        (typeFilter === "Remote" && (
+          (j.employment_type && j.employment_type.toLowerCase() === "remote") ||
+          (j.location && j.location.toLowerCase().includes("remote"))
+        ));
+      const matchesDomain =
+        domainFilter === "All Domains" ||
+        (j.role_category && j.role_category.toLowerCase() === domainFilter.toLowerCase());
+
+      const shouldFilterByProfile =
+        activeTab === "all"
+          ? (onlyTargetRolesAndSkills ? isMatchingProfile(j, selectedTargetRole, selectedSkill) : true)
+          : true;
+
+      return matchesSearch && matchesLocation && matchesType && matchesDomain && shouldFilterByProfile;
+    });
+  }, [
+    currentFeedJobs,
+    search,
+    locationFilter,
+    typeFilter,
+    domainFilter,
+    onlyTargetRolesAndSkills,
+    activeTab,
+    selectedTargetRole,
+    selectedSkill,
+    isMatchingProfile,
+  ]);
 
   const displayJobs =
     activeTab === "saved"
-      ? filteredJobs.filter((j) => savedJobs.has(j.id))
+      ? (recommendedJobs.concat(allCatalogJobs)).filter((j, idx, arr) => arr.findIndex(x => x.id === j.id) === idx && savedJobs.has(j.id))
       : filteredJobs;
 
   return (
@@ -337,6 +478,132 @@ export default function JobsPage() {
           </div>
         )}
 
+        {/* Target Roles & Skills Strict Matching Bar */}
+        {(activeResume || (targetRoles && targetRoles.length > 0) || candidateSkills.length > 0) && (
+          <div className="bg-app-surface border border-app-border rounded-2xl p-4 sm:p-5 shadow-xs space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-app-border">
+              <div className="flex items-center gap-2.5">
+                <div
+                  className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${
+                    onlyTargetRolesAndSkills
+                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                      : "bg-app-bg text-app-text-muted"
+                  }`}
+                >
+                  <Target size={16} />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-app-text">
+                      Target Roles & Skills Filter
+                    </h2>
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        onlyTargetRolesAndSkills
+                          ? "bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300"
+                          : "bg-app-bg text-app-text-muted border border-app-border"
+                      }`}
+                    >
+                      {onlyTargetRolesAndSkills ? "Active — Filtered" : "All Jobs Shown"}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-app-text-muted mt-0.5">
+                    {onlyTargetRolesAndSkills
+                      ? `Displaying strictly jobs matching your target roles (${targetRoles.slice(0, 3).join(", ") || primaryDesignation}) or verified skills.`
+                      : "Showing all available jobs in the database (including non-matching domains)."}
+                  </p>
+                </div>
+              </div>
+
+              {/* Toggle Button */}
+              <button
+                type="button"
+                onClick={() => setOnlyTargetRolesAndSkills((prev) => !prev)}
+                className={`flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 self-start sm:self-center border ${
+                  onlyTargetRolesAndSkills
+                    ? "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700 shadow-xs"
+                    : "bg-app-bg text-app-text border-app-border hover:bg-app-surface hover:border-emerald-500/40"
+                }`}
+              >
+                {onlyTargetRolesAndSkills ? (
+                  <>
+                    <Check size={13} />
+                    Only My Roles & Skills
+                  </>
+                ) : (
+                  <>
+                    <Sparkles size={13} className="text-amber-500" />
+                    Show All Jobs
+                  </>
+                )}
+              </button>
+            </div>
+
+            {/* Target Role Pills and Skill Selector */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-0.5">
+              {/* Role Pills */}
+              {targetRoles && targetRoles.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] font-semibold text-app-text-muted mr-1">Role:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedTargetRole("All My Roles");
+                      setOnlyTargetRolesAndSkills(true);
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all ${
+                      selectedTargetRole === "All My Roles" && onlyTargetRolesAndSkills
+                        ? "bg-blue-600 text-white shadow-xs"
+                        : "bg-app-bg text-app-text-muted hover:text-app-text hover:bg-app-border/40"
+                    }`}
+                  >
+                    All My Roles
+                  </button>
+                  {targetRoles.map((role) => (
+                    <button
+                      type="button"
+                      key={role}
+                      onClick={() => {
+                        setSelectedTargetRole(role);
+                        setOnlyTargetRolesAndSkills(true);
+                      }}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-all ${
+                        selectedTargetRole === role && onlyTargetRolesAndSkills
+                          ? "bg-blue-600 text-white shadow-xs"
+                          : "bg-app-bg text-app-text-muted hover:text-app-text hover:bg-app-border/40"
+                      }`}
+                    >
+                      {role}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* Skill Dropdown */}
+              {candidateSkills.length > 0 && (
+                <div className="flex items-center gap-2 ml-auto">
+                  <span className="text-[11px] font-semibold text-app-text-muted">Skill:</span>
+                  <select
+                    value={selectedSkill}
+                    onChange={(e) => {
+                      setSelectedSkill(e.target.value);
+                      setOnlyTargetRolesAndSkills(true);
+                    }}
+                    className="px-2.5 py-1 rounded-lg border border-app-border bg-app-bg text-xs text-app-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-all font-medium"
+                  >
+                    <option value="All Skills">All Skills ({candidateSkills.length})</option>
+                    {candidateSkills.slice(0, 25).map((skill) => (
+                      <option key={skill} value={skill}>
+                        {skill}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Search + Filters */}
         <div className="flex flex-col sm:flex-row gap-3">
           <div className="relative flex-1">
@@ -366,6 +633,27 @@ export default function JobsPage() {
           >
             {["All", "Full-time", "Part-time", "Remote", "Contract", "Internship"].map((t) => (
               <option key={t} value={t}>{t}</option>
+            ))}
+          </select>
+          <select
+            value={domainFilter}
+            onChange={(e) => setDomainFilter(e.target.value)}
+            className="px-3 py-2.5 rounded-xl border border-app-border bg-app-surface text-sm text-app-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 transition-all"
+          >
+            {[
+              "All Domains",
+              "AI/ML",
+              "Backend Engineering",
+              "Finance & Banking",
+              "Consulting & Strategy",
+              "Design & Creative",
+              "Marketing & Growth",
+              "Human Resources",
+              "Sales & Business Dev",
+              "Operations & Logistics",
+              "Healthcare & Life Sciences",
+            ].map((d) => (
+              <option key={d} value={d}>{d}</option>
             ))}
           </select>
         </div>
@@ -405,26 +693,61 @@ export default function JobsPage() {
             </button>
           </div>
         ) : displayJobs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
-            <Briefcase size={36} className="text-app-text-muted/30" />
-            <p className="font-semibold text-app-text">
-              {activeTab === "saved" ? "No saved jobs yet" : "No jobs found"}
+          <div className="flex flex-col items-center justify-center py-16 gap-3.5 text-center bg-app-surface border border-app-border rounded-2xl p-8">
+            <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 flex items-center justify-center">
+              <Target size={24} />
+            </div>
+            <p className="text-base font-bold text-app-text">
+              {activeTab === "saved"
+                ? "No saved jobs yet"
+                : activeTab === "recommended"
+                ? "No strong job matches found right now."
+                : "No jobs match your search criteria"}
             </p>
-            <p className="text-sm text-app-text-muted max-w-sm">
+            <p className="text-xs text-app-text-muted max-w-md leading-relaxed">
               {activeTab === "saved"
                 ? "Bookmark jobs to save them here."
-                : hasResume
-                ? "Try adjusting your search filters, or refresh to load new matches."
-                : "Upload your resume to get AI-powered job recommendations."}
+                : activeTab === "recommended"
+                ? "We only recommend jobs that achieve a 65%+ match score with your active resume, verified skills, and target roles without domain mismatches."
+                : "Try adjusting your search query, location, or domain filters."}
             </p>
-            {!hasResume && (
+            {activeTab === "recommended" ? (
+              <div className="flex flex-wrap items-center justify-center gap-2.5 mt-2">
+                <button
+                  type="button"
+                  onClick={fetchJobs}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition-colors shadow-xs"
+                >
+                  <RefreshCw size={12} /> Refresh Recommendations
+                </button>
+                <Link
+                  href="/candidate/resumes"
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-app-border text-xs font-semibold text-app-text hover:bg-app-bg transition-colors"
+                >
+                  <FileText size={12} /> Update Target Roles
+                </Link>
+                <Link
+                  href="/candidate/learning"
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-app-border text-xs font-semibold text-app-text hover:bg-app-bg transition-colors"
+                >
+                  <Zap size={12} /> Start Learning Skills
+                </Link>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("all")}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-blue-200/80 dark:border-blue-800/60 text-blue-600 dark:text-blue-400 text-xs font-semibold hover:bg-blue-50 dark:hover:bg-blue-950/30 transition-colors"
+                >
+                  Browse All Jobs →
+                </button>
+              </div>
+            ) : !hasResume ? (
               <Link
                 href="/candidate/resumes/upload"
-                className="mt-2 flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
+                className="mt-2 flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 transition-colors"
               >
                 <FileText size={14} /> Upload Resume
               </Link>
-            )}
+            ) : null}
           </div>
         ) : (
           <div className="space-y-4">

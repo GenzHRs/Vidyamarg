@@ -1316,14 +1316,32 @@ export const apiService = {
     }
   },
 
-  // Jobs — personalized recommendations for the Jobs page
+  // Jobs — strict candidate recommendations based on active resume, target roles, and skills
   async getRecommendedJobs() {
-    const res = await customFetch(`${getBaseUrl()}/job-agent/jobs?page=1&page_size=20`, { headers: getHeaders() });
+    const res = await customFetch(`${getBaseUrl()}/jobs/recommended?limit=50`, { headers: getHeaders() });
     if (!res.ok) {
-      throw new Error("Failed to fetch jobs");
+      // Fallback to /job-agent/jobs?recommended_only=true
+      const fallbackRes = await customFetch(`${getBaseUrl()}/job-agent/jobs?recommended_only=true&page_size=50`, { headers: getHeaders() });
+      if (!fallbackRes.ok) throw new Error("Failed to fetch recommended jobs");
+      const fallbackData = await fallbackRes.json();
+      const rawJobs = Array.isArray(fallbackData) ? fallbackData : (fallbackData.jobs || []);
+      return this._formatJobsPayload(rawJobs);
     }
     const data = await res.json();
     const rawJobs = Array.isArray(data) ? data : (data.jobs || []);
+    return this._formatJobsPayload(rawJobs);
+  },
+
+  // General catalog / search job feed
+  async getAllJobs() {
+    const res = await customFetch(`${getBaseUrl()}/job-agent/jobs?page=1&page_size=50`, { headers: getHeaders() });
+    if (!res.ok) throw new Error("Failed to fetch jobs");
+    const data = await res.json();
+    const rawJobs = Array.isArray(data) ? data : (data.jobs || []);
+    return this._formatJobsPayload(rawJobs);
+  },
+
+  _formatJobsPayload(rawJobs: any[]) {
     return rawJobs.map((j: any) => ({
       id: j.id,
       title: j.title,
@@ -1333,16 +1351,25 @@ export const apiService = {
       salary: j.salary_raw || (j.salary_min ? `$${j.salary_min}k - $${j.salary_max}k` : undefined),
       description: j.description_summary || j.description,
       required_skills: j.required_skills || [],
-      match_score: (j.overall_score !== undefined && j.overall_score !== null)
+      match_score: (j.match_score !== undefined && j.match_score !== null)
+        ? j.match_score
+        : (j.overall_score !== undefined && j.overall_score !== null)
         ? j.overall_score
         : (j.match?.overall_score !== undefined && j.match?.overall_score !== null)
         ? j.match.overall_score
-        : j.match_score,
+        : 0,
+      role_match: j.role_match,
+      skill_match: j.skill_match,
+      experience_match: j.experience_match,
+      responsibility_match: j.responsibility_match,
       matched_skills: j.matched_skills || j.match?.match_reasons || [],
       missing_skills: j.missing_skills || j.match?.missing_skills || [],
-      application_url: j.apply_url || j.job_url,
-      posted_date: j.posted_at,
+      match_explanation: j.recommendation_reason || (Array.isArray(j.match_reasons) ? j.match_reasons.join(" • ") : (j.match_explanation || (Array.isArray(j.match?.match_reasons) ? j.match.match_reasons.join(" • ") : undefined))),
+      application_url: j.apply_url || j.job_url || j.application_url,
+      posted_date: j.posted_at || j.posted_date,
       source: j.source_name || j.source || "Database",
+      role_category: j.role_category,
+      industry: j.industry,
     }));
   },
 

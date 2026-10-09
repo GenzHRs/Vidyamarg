@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from app.api.routers import (
     auth, profile, resume, learning, mentor,
     chat, notifications, admin, job_agent, resume_center,
-    career_agent, autofill
+    career_agent, autofill, jobs
 )
 
 
@@ -23,6 +23,7 @@ router.include_router(chat.router)
 router.include_router(notifications.router)
 router.include_router(admin.router)
 router.include_router(job_agent.router)
+router.include_router(jobs.router, prefix="/jobs")
 router.include_router(career_agent.router)
 router.include_router(autofill.router, prefix="/applications/autofill")
 

@@ -127,7 +127,6 @@ def test_agent_job_search_instruction(environment, candidate_with_resume):
     res = client.post("/api/v1/agent/chat", json=payload, headers=auth)
     assert res.status_code == 200
     data = res.json()
-
     assert "response" in data
     assert len(data["plan"]) > 0
     assert any(step["status"] == "completed" for step in data["plan"])

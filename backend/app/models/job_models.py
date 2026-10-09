@@ -466,6 +466,11 @@ class Application(Base):
     # Application details
     applied_via = Column(String(100), nullable=True)    # portal name, direct, referral
     resume_version_id = Column(Integer, ForeignKey("candidate_resumes.id", ondelete="SET NULL"), nullable=True)
+
+    # Link to the JD-optimized resume snapshot used for this application
+    # (FK to resume_optimizations; nullable — set when candidate prepares application)
+    optimization_id = Column(Integer, ForeignKey("resume_optimizations.id", ondelete="SET NULL"), nullable=True, index=True)
+
     cover_letter = Column(Text, nullable=True)
     notes = Column(Text, nullable=True)                 # user's personal notes
 

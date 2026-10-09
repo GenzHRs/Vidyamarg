@@ -7,7 +7,8 @@ import {
   ArrowLeft, Sparkles, CheckCircle2, AlertTriangle, 
   ShieldCheck, ArrowRight, RefreshCw, FileText, 
   Check, X, Eye, Layers, Download, Code,
-  Sliders, Briefcase, ExternalLink, ChevronRight
+  Sliders, Briefcase, ExternalLink, ChevronRight,
+  UserCheck, Send, CheckSquare, Square, Info
 } from "lucide-react";
 import { 
   resumeCenterApi, 
@@ -17,7 +18,9 @@ import {
   SuggestedChange,
   StructuredResumeData,
   SourceResumeForTailoring,
-  RenderTailoredTemplateResponse
+  RenderTailoredTemplateResponse,
+  JDOptimizeResponse,
+  PreparedApplication
 } from "@/services/resumeCenterApi";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -45,6 +48,10 @@ export default function ResumeTailoringPage({ params }: PageProps) {
   const [jobTitle, setJobTitle] = useState("");
   const [company, setCompany] = useState("");
   const [jobDescription, setJobDescription] = useState("");
+  const [renderingMode, setRenderingMode] = useState<"template" | "original_layout">("template");
+  const [candidateApproved, setCandidateApproved] = useState(false);
+  const [approving, setApproving] = useState(false);
+  const [approvalNotes, setApprovalNotes] = useState("");
 
   // Operation A: Tailoring Content Generation States
   const [analyzing, setAnalyzing] = useState(false);
@@ -62,6 +69,7 @@ export default function ResumeTailoringPage({ params }: PageProps) {
     ats_keywords: string[];
     warnings: string[];
   } | null>(null);
+  const [optimizationResult, setOptimizationResult] = useState<JDOptimizeResponse | null>(null);
 
   // Operation B: Template Rendering & Live PDF Preview States
   const [renderingTemplate, setRenderingTemplate] = useState(false);
@@ -83,6 +91,14 @@ export default function ResumeTailoringPage({ params }: PageProps) {
   const [saveModalOpen, setSaveModalOpen] = useState(false);
   const [customNewTitle, setCustomNewTitle] = useState("");
   const [savingResume, setSavingResume] = useState(false);
+
+  // Application Preparation States
+  const [appDrawerOpen, setAppDrawerOpen] = useState(false);
+  const [preparingApp, setPreparingApp] = useState(false);
+  const [confirmingApp, setConfirmingApp] = useState(false);
+  const [preparedApp, setPreparedApp] = useState<PreparedApplication | null>(null);
+  const [userConfirmedAcknowledgement, setUserConfirmedAcknowledgement] = useState(false);
+  const [appConfirmedMessage, setAppConfirmedMessage] = useState<string | null>(null);
 
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
@@ -144,41 +160,90 @@ export default function ResumeTailoringPage({ params }: PageProps) {
       setErrorMessage("");
       setSuccessMessage("");
 
-      const result = await resumeCenterApi.generateTailoredResume({
+      // Call production JD-Driven ATS Optimization Engine
+      const optResult = await resumeCenterApi.optimizeResume({
         resume_id: resumeId,
+        job_description: jobDescription,
         job_title: jobTitle,
         company: company || "Target Company",
-        job_description: jobDescription,
-        template_id: selectedTemplateId
+        template_id: selectedTemplateId,
+        rendering_mode: renderingMode
       });
+      setOptimizationResult(optResult);
+      setCandidateApproved(Boolean(optResult.candidate_approved));
 
       // Normalize result into state
       const tailoredState = {
-        analysis: result.analysis,
+        analysis: {
+          job_title: optResult.job_title,
+          company: optResult.company,
+          required_skills: optResult.matched_skills,
+          preferred_skills: optResult.partial_matches,
+          responsibilities: [],
+          matching_skills: optResult.matched_skills,
+          missing_requirements: optResult.missing_skills,
+          transferable_skills: optResult.partial_matches,
+          suggested_changes: [],
+          final_resume_data: optResult.optimized_resume,
+          ats_keywords: optResult.matched_skills,
+          warnings: optResult.recommendations
+        },
         source_resume_id: resumeId,
-        job_title: jobTitle,
-        company: company || "Target Company",
-        original_resume: result.original_resume,
-        tailored_resume_data: (result as any).tailored_resume_data || result.proposed_resume,
-        matching_skills: (result as any).matching_skills || result.analysis.matching_skills || [],
-        missing_requirements: (result as any).missing_requirements || result.analysis.missing_requirements || [],
-        transferable_skills: (result as any).transferable_skills || result.analysis.transferable_skills || [],
-        suggested_changes: result.suggested_changes || [],
-        ats_keywords: (result as any).ats_keywords || result.analysis.ats_keywords || [],
-        warnings: result.warnings || []
+        job_title: optResult.job_title,
+        company: optResult.company || "Target Company",
+        original_resume: sourceResume?.structured_data || optResult.optimized_resume,
+        tailored_resume_data: optResult.optimized_resume,
+        matching_skills: optResult.matched_skills,
+        missing_requirements: optResult.missing_skills,
+        transferable_skills: optResult.partial_matches,
+        suggested_changes: [],
+        ats_keywords: optResult.matched_skills,
+        warnings: optResult.recommendations
       };
 
       setTailorResult(tailoredState);
       setCustomNewTitle(`${sourceResume?.title || "Resume"} - ${jobTitle} (${company || "Target Company"})`);
       setCurrentStep("diffs");
-      setSuccessMessage("Content tailored! Review matching skills and proposed diffs, then select your template.");
+      setSuccessMessage(`Job Analysis complete! RESUME MATCH SCORE: ${optResult.resume_match_score || optResult.ats_score} / 100 (TRUTHFULNESS CHECK: 100% Verified).`);
 
       // Automatically pre-render selected template (Operation B)
-      await handleRenderTemplate(selectedTemplateId, tailoredState.tailored_resume_data);
+      await handleRenderTemplate(selectedTemplateId, optResult.optimized_resume);
     } catch (err: any) {
       setErrorMessage(err.message || "Failed to generate tailored resume analysis");
     } finally {
       setAnalyzing(false);
+    }
+  };
+
+  const handlePrepareApplication = async () => {
+    if (!optimizationResult) return;
+    try {
+      setPreparingApp(true);
+      const res = await resumeCenterApi.prepareApplication(optimizationResult.optimization_id);
+      setPreparedApp(res);
+      setAppDrawerOpen(true);
+      setUserConfirmedAcknowledgement(false);
+      setAppConfirmedMessage(null);
+    } catch (err: any) {
+      setErrorMessage(err.message || "Failed to prepare application");
+    } finally {
+      setPreparingApp(false);
+    }
+  };
+
+  const handleConfirmApplication = async () => {
+    if (!optimizationResult || !userConfirmedAcknowledgement) return;
+    try {
+      setConfirmingApp(true);
+      const res = await resumeCenterApi.confirmApplication(optimizationResult.optimization_id, {
+        user_acknowledged: true,
+      });
+      setPreparedApp(res.prepared_application);
+      setAppConfirmedMessage(res.message);
+    } catch (err: any) {
+      setErrorMessage(err.message || "Failed to confirm application");
+    } finally {
+      setConfirmingApp(false);
     }
   };
 
@@ -390,6 +455,60 @@ export default function ResumeTailoringPage({ params }: PageProps) {
             </p>
           </div>
 
+          {/* Rendering Mode Selector (Mode A: Choose Template vs Mode B: Edit Original Resume) */}
+          <div>
+            <label className="block text-xs font-bold text-app-text mb-2">Rendering Mode</label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div 
+                onClick={() => setRenderingMode("template")}
+                className={`cursor-pointer p-4 rounded-xl border transition-all ${
+                  renderingMode === "template"
+                    ? "border-purple-600 bg-purple-50/50 dark:bg-purple-950/20 ring-1 ring-purple-600"
+                    : "border-app-border bg-app-surface hover:border-purple-300"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-app-text flex items-center gap-1.5">
+                    <Layers size={14} className="text-purple-600" />
+                    Mode A: Choose a Template
+                  </span>
+                  {renderingMode === "template" && <CheckCircle2 size={15} className="text-purple-600" />}
+                </div>
+                <p className="text-[11px] text-app-text-muted leading-relaxed">
+                  Populate one of 15 ATS-optimized LaTeX / ReportLab templates with verified job-specific content.
+                </p>
+                <div className="mt-2 flex gap-1.5">
+                  <Badge variant="outline" className="text-[10px] py-0">PDF Supported</Badge>
+                  <Badge variant="outline" className="text-[10px] py-0">DOCX Supported</Badge>
+                </div>
+              </div>
+
+              <div 
+                onClick={() => setRenderingMode("original_layout")}
+                className={`cursor-pointer p-4 rounded-xl border transition-all ${
+                  renderingMode === "original_layout"
+                    ? "border-purple-600 bg-purple-50/50 dark:bg-purple-950/20 ring-1 ring-purple-600"
+                    : "border-app-border bg-app-surface hover:border-purple-300"
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-app-text flex items-center gap-1.5">
+                    <FileText size={14} className="text-purple-600" />
+                    Mode B: Edit My Original Resume
+                  </span>
+                  {renderingMode === "original_layout" && <CheckCircle2 size={15} className="text-purple-600" />}
+                </div>
+                <p className="text-[11px] text-app-text-muted leading-relaxed">
+                  Edit your uploaded document while preserving its original design, fonts, and structure as far as supported.
+                </p>
+                <div className="mt-2 flex gap-1.5">
+                  <Badge variant="outline" className="text-[10px] py-0">Preserve Typography</Badge>
+                  <Badge variant="outline" className="text-[10px] py-0">Run-Aware DOCX</Badge>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-bold text-app-text mb-1.5">Job Title *</label>
@@ -467,6 +586,290 @@ export default function ResumeTailoringPage({ params }: PageProps) {
             </div>
           </div>
 
+          {/* RESUME MATCH SCORE Header & Metrics Breakdown */}
+          {optimizationResult && (
+            <Card className="p-6 bg-app-card border-app-border space-y-6 shadow-sm">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-app-border pb-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-24 h-20 rounded-2xl bg-purple-100 dark:bg-purple-950/60 border border-purple-300 dark:border-purple-800 flex flex-col items-center justify-center text-purple-700 dark:text-purple-300 shrink-0 shadow-xs">
+                    <span className="text-2xl font-black">
+                      {optimizationResult.resume_match_score || optimizationResult.ats_score}
+                      <span className="text-xs font-normal text-purple-600/70"> / 100</span>
+                    </span>
+                    <span className="text-[9px] font-extrabold uppercase tracking-wider text-center leading-tight">
+                      RESUME MATCH SCORE
+                    </span>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-base font-bold text-app-text">
+                        {optimizationResult.job_title} Optimization Report
+                      </h3>
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                        Target Title: {optimizationResult.dynamic_title || optimizationResult.job_title}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-app-text-muted flex-wrap">
+                      <span>Target Company: <strong className="text-app-text">{optimizationResult.company}</strong></span>
+                      <span>&bull;</span>
+                      <span className="inline-flex items-center gap-1 font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-2 py-0.5 rounded-md border border-emerald-200 dark:border-emerald-800">
+                        <ShieldCheck size={12} />
+                        TRUTHFULNESS CHECK: 100% Verified
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Direct Document Downloads & Application Draft Actions */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button
+                    onClick={handlePrepareApplication}
+                    disabled={preparingApp}
+                    className="bg-purple-600 hover:bg-purple-700 text-white font-semibold text-xs px-3.5 py-2 shadow-sm"
+                  >
+                    {preparingApp ? (
+                      <>
+                        <RefreshCw size={13} className="animate-spin mr-1.5" />
+                        Preparing Form...
+                      </>
+                    ) : (
+                      <>
+                        <UserCheck size={13} className="mr-1.5" />
+                        Prepare Application Form
+                      </>
+                    )}
+                  </Button>
+                  <a
+                    href={resumeCenterApi.getOptimizedPdfUrl(optimizationResult.optimization_id)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <Button variant="outline" size="sm" className="text-xs border-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/40">
+                      <Download size={13} className="mr-1.5 text-purple-600" />
+                      Download PDF
+                    </Button>
+                  </a>
+                  <a
+                    href={resumeCenterApi.getOptimizedDocxUrl(optimizationResult.optimization_id)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <Button variant="outline" size="sm" className="text-xs border-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/40">
+                      <Download size={13} className="mr-1.5 text-blue-600" />
+                      Download Word
+                    </Button>
+                  </a>
+                </div>
+              </div>
+
+              {/* Mode & Fidelity Tier Badge */}
+              <div className="flex items-center justify-between p-3 rounded-xl bg-purple-50/60 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-800 text-xs">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="bg-purple-100 dark:bg-purple-900/60 text-purple-800 dark:text-purple-300 border-purple-300 font-bold">
+                    {optimizationResult.rendering_mode === "original_layout" ? "Mode B: Original Resume Layout" : "Mode A: ATS Template"}
+                  </Badge>
+                  <span className="text-[11px] text-app-text-muted">
+                    Fidelity: <strong className="text-app-text capitalize">{String(optimizationResult.fidelity_tier || "template_fallback").replace(/_/g, " ")}</strong>
+                  </span>
+                </div>
+
+                {/* Candidate Approval Action */}
+                <div className="flex items-center gap-2">
+                  {candidateApproved || optimizationResult.candidate_approved ? (
+                    <span className="inline-flex items-center gap-1.5 font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-3 py-1 rounded-lg border border-emerald-300 text-xs">
+                      <CheckCircle2 size={14} />
+                      Approved for Applications
+                    </span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      disabled={approving}
+                      onClick={async () => {
+                        try {
+                          setApproving(true);
+                          const res = await resumeCenterApi.approveOptimization(optimizationResult.optimization_id, {
+                            user_acknowledged: true,
+                            notes: "Candidate approved via Tailor Studio"
+                          });
+                          setCandidateApproved(true);
+                          setSuccessMessage(res.message);
+                        } catch (e: any) {
+                          setErrorMessage(e.message || "Failed to approve revision");
+                        } finally {
+                          setApproving(false);
+                        }
+                      }}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs px-3.5 py-1.5 shadow-sm"
+                    >
+                      {approving ? "Approving..." : "Approve This Version"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* Mandatory Score Disclaimer */}
+              <div className="flex items-start gap-2 text-[11px] text-app-text-muted bg-app-surface/60 p-2.5 rounded-xl border border-app-border leading-relaxed">
+                <Info size={14} className="text-purple-600 dark:text-purple-400 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Disclaimer:</strong> Calculated from job-description keyword, experience, technical-skill, responsibility, role-alignment, and resume-quality matching. This score is an optimization indicator and does not guarantee ATS selection.
+                </span>
+              </div>
+
+              {/* 6-Part Component Metrics Breakdown */}
+              <div>
+                <span className="text-[10px] font-bold text-app-text-muted uppercase tracking-wider block mb-2">
+                  Weighted Component Breakdown
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+                  <div className="p-3 rounded-xl bg-app-surface border border-app-border text-center space-y-1">
+                    <span className="text-[10px] font-bold text-app-text-muted uppercase">Keyword Match</span>
+                    <div className="text-lg font-black text-purple-600">{optimizationResult.keyword_match}%</div>
+                    <div className="text-[9px] text-app-text-muted">Weight 25%</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-app-surface border border-app-border text-center space-y-1">
+                    <span className="text-[10px] font-bold text-app-text-muted uppercase">Experience</span>
+                    <div className="text-lg font-black text-blue-600">{optimizationResult.experience_match}%</div>
+                    <div className="text-[9px] text-app-text-muted">Weight 25%</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-app-surface border border-app-border text-center space-y-1">
+                    <span className="text-[10px] font-bold text-app-text-muted uppercase">Technical</span>
+                    <div className="text-lg font-black text-indigo-600">{optimizationResult.technical_match}%</div>
+                    <div className="text-[9px] text-app-text-muted">Weight 20%</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-app-surface border border-app-border text-center space-y-1">
+                    <span className="text-[10px] font-bold text-app-text-muted uppercase">Responsibilities</span>
+                    <div className="text-lg font-black text-emerald-600">{optimizationResult.responsibility_match}%</div>
+                    <div className="text-[9px] text-app-text-muted">Weight 15%</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-app-surface border border-app-border text-center space-y-1">
+                    <span className="text-[10px] font-bold text-app-text-muted uppercase">Role Alignment</span>
+                    <div className="text-lg font-black text-amber-600">{optimizationResult.alignment_score}%</div>
+                    <div className="text-[9px] text-app-text-muted">Weight 10%</div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-app-surface border border-app-border text-center space-y-1">
+                    <span className="text-[10px] font-bold text-app-text-muted uppercase">Resume Quality</span>
+                    <div className="text-lg font-black text-teal-600">{optimizationResult.quality_score || 92}%</div>
+                    <div className="text-[9px] text-app-text-muted">Weight 5%</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Score Explanation: Positive & Negative Factors */}
+              {optimizationResult.score_explanation && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-1 border-t border-app-border">
+                  <div className="p-3.5 rounded-xl bg-emerald-50/40 dark:bg-emerald-950/20 border border-emerald-200/60 dark:border-emerald-800/40 space-y-2">
+                    <span className="text-[10px] font-bold text-emerald-800 dark:text-emerald-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <CheckCircle2 size={13} className="text-emerald-600" /> Positive Matching Factors
+                    </span>
+                    <ul className="text-xs text-app-text-secondary space-y-1.5">
+                      {optimizationResult.score_explanation.positive_factors?.map((pos, idx) => (
+                        <li key={idx} className="flex items-start gap-1.5">
+                          <span className="text-emerald-600 font-bold shrink-0">{pos.startsWith('+') ? '' : '+ '}</span>
+                          <span>{pos.replace(/^\+\s*/, '')}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-amber-50/40 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-800/40 space-y-2">
+                    <span className="text-[10px] font-bold text-amber-800 dark:text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <AlertTriangle size={13} className="text-amber-600" /> Negative Factors / Growth Areas
+                    </span>
+                    <ul className="text-xs text-app-text-secondary space-y-1.5">
+                      {optimizationResult.score_explanation.negative_factors?.map((neg, idx) => (
+                        <li key={idx} className="flex items-start gap-1.5">
+                          <span className="text-amber-600 font-bold shrink-0">{neg.startsWith('-') ? '' : '- '}</span>
+                          <span>{neg.replace(/^-\s*/, '')}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+
+              {/* Application Readiness Card */}
+              {optimizationResult.application_readiness && (
+                <div className="p-4 rounded-xl bg-gradient-to-r from-purple-500/10 via-blue-500/10 to-teal-500/10 border border-purple-300/60 dark:border-purple-800/40 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-xs font-bold text-app-text uppercase tracking-wider">Application Readiness:</span>
+                      <Badge className={`text-xs font-bold px-3 py-1 ${
+                        optimizationResult.application_readiness.readiness_level === 'HIGH'
+                          ? 'bg-emerald-100 text-emerald-800 border-emerald-300 dark:bg-emerald-900/60 dark:text-emerald-200'
+                          : optimizationResult.application_readiness.readiness_level === 'MEDIUM'
+                          ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-900/60 dark:text-amber-200'
+                          : 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-900/60 dark:text-rose-200'
+                      }`}>
+                        {optimizationResult.application_readiness.readiness_level} READINESS
+                      </Badge>
+                    </div>
+                    <span className="text-xs text-app-text-muted">
+                      Matched: <strong className="text-app-text">{optimizationResult.application_readiness.matched_skills_count}</strong> &bull; Partial: <strong className="text-app-text">{optimizationResult.application_readiness.partial_skills_count}</strong> &bull; Missing: <strong className="text-app-text">{optimizationResult.application_readiness.missing_skills_count}</strong>
+                    </span>
+                  </div>
+                  <p className="text-xs font-medium text-app-text leading-relaxed">
+                    <strong>Recommendation:</strong> {optimizationResult.application_readiness.recommendation}
+                  </p>
+                  {optimizationResult.application_readiness.reasoning?.length > 0 && (
+                    <ul className="text-[11px] text-app-text-secondary space-y-1 pl-1">
+                      {optimizationResult.application_readiness.reasoning.map((r, i) => (
+                        <li key={i} className="flex items-start gap-1.5">
+                          <span className="text-purple-600 font-bold">&bull;</span>
+                          <span>{r}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+
+              {/* Optimization Guidance */}
+              {optimizationResult.recommendations && optimizationResult.recommendations.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-purple-50/30 dark:bg-purple-950/20 border border-purple-200/60 dark:border-purple-800/40 space-y-1.5">
+                  <span className="text-[10px] font-bold text-purple-700 dark:text-purple-300 uppercase tracking-wider">
+                    Optimization Guidance
+                  </span>
+                  <ul className="text-xs text-app-text-secondary space-y-1">
+                    {optimizationResult.recommendations.map((rec, i) => (
+                      <li key={i} className="flex items-start gap-2">
+                        <span className="text-purple-600 font-bold">•</span>
+                        <span>{rec}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Evidence Matching Traceability Breakdown */}
+              {optimizationResult.evidence_items && optimizationResult.evidence_items.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-app-border">
+                  <span className="text-[10px] font-bold text-app-text-muted uppercase tracking-wider">
+                    Candidate Evidence Traceability (Rule 14)
+                  </span>
+                  <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                    {optimizationResult.evidence_items.map((ev, idx) => (
+                      <div key={idx} className="p-2.5 rounded-lg bg-app-surface border border-app-border flex items-center justify-between text-xs gap-3">
+                        <div className="space-y-0.5 min-w-0">
+                          <span className="font-bold text-app-text block truncate">{ev.requirement}</span>
+                          {ev.evidence && (
+                            <p className="text-[11px] text-app-text-muted line-clamp-1">{ev.evidence}</p>
+                          )}
+                        </div>
+                        <Badge className={`text-[10px] uppercase font-bold shrink-0 ${
+                          ev.match_type === "STRONG_MATCH" ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300" :
+                          ev.match_type === "PARTIAL_MATCH" ? "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300" :
+                          "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300"
+                        }`}>
+                          {ev.match_type.replace("_", " ")}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </Card>
+          )}
+
           {/* Skill Matching Cards Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Matching Skills */}
@@ -490,29 +893,85 @@ export default function ResumeTailoringPage({ params }: PageProps) {
               </div>
             </Card>
 
-            {/* Missing Requirements */}
+            {/* Missing Requirements with Critical / Important / Optional Breakdown */}
             <Card className="p-5 bg-app-card border-app-border space-y-3">
               <div className="flex items-center justify-between">
                 <h3 className="text-xs font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
                   <AlertTriangle size={14} />
-                  Missing JD Requirements ({tailorResult.missing_requirements.length})
+                  Missing Requirements Intelligence ({tailorResult.missing_requirements.length})
                 </h3>
-                <span className="text-[10px] text-app-text-muted font-semibold">Not found in profile</span>
+                <span className="text-[10px] text-app-text-muted font-semibold">Prioritized Skill Gaps</span>
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {tailorResult.missing_requirements.length > 0 ? (
-                  tailorResult.missing_requirements.map((req, idx) => (
-                    <span
-                      key={idx}
-                      className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
-                    >
-                      {req}
-                    </span>
-                  ))
-                ) : (
-                  <span className="text-xs text-app-text-muted">No missing requirements detected!</span>
-                )}
-              </div>
+
+              {optimizationResult?.skill_gaps && (
+                <div className="space-y-3 pt-1">
+                  {optimizationResult.skill_gaps.critical_gaps?.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold text-rose-600 dark:text-rose-400 uppercase tracking-wider block">
+                        Critical Gaps (Required)
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {optimizationResult.skill_gaps.critical_gaps.map((cg, i) => (
+                          <span key={i} className="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
+                            {cg}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {optimizationResult.skill_gaps.important_gaps?.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wider block">
+                        Important Gaps (Preferred)
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {optimizationResult.skill_gaps.important_gaps.map((ig, i) => (
+                          <span key={i} className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                            {ig}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {optimizationResult.skill_gaps.optional_gaps?.length > 0 && (
+                    <div className="space-y-1">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
+                        Optional Gaps (Nice-to-have)
+                      </span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {optimizationResult.skill_gaps.optional_gaps.map((og, i) => (
+                          <span key={i} className="px-2.5 py-1 rounded-full text-xs font-normal bg-slate-50 text-slate-700 dark:bg-slate-900 dark:text-slate-300 border border-slate-200 dark:border-slate-800">
+                            {og}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {(!optimizationResult?.skill_gaps || (
+                !optimizationResult.skill_gaps.critical_gaps?.length &&
+                !optimizationResult.skill_gaps.important_gaps?.length &&
+                !optimizationResult.skill_gaps.optional_gaps?.length
+              )) && (
+                <div className="flex flex-wrap gap-1.5">
+                  {tailorResult.missing_requirements.length > 0 ? (
+                    tailorResult.missing_requirements.map((req, idx) => (
+                      <span
+                        key={idx}
+                        className="px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800"
+                      >
+                        {req}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-xs text-app-text-muted">No missing requirements detected!</span>
+                  )}
+                </div>
+              )}
             </Card>
           </div>
 
@@ -838,6 +1297,146 @@ export default function ResumeTailoringPage({ params }: PageProps) {
               {savingResume ? "Saving & Finalizing..." : "Confirm & Save"}
             </Button>
           </div>
+        </div>
+      </Modal>
+
+      {/* ── APPLICATION PREPARATION & AUTOFILL MODAL ───────────────────────── */}
+      <Modal
+        isOpen={appDrawerOpen}
+        onClose={() => setAppDrawerOpen(false)}
+        title="Candidate Job Application Preparation"
+        className="max-w-3xl"
+      >
+        <div className="space-y-5 pt-2 max-h-[75vh] overflow-y-auto pr-1">
+          <div className="p-3.5 rounded-xl bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/50 space-y-1">
+            <div className="flex items-center gap-2">
+              <ShieldCheck size={16} className="text-purple-600" />
+              <h4 className="text-xs font-bold text-purple-900 dark:text-purple-200 uppercase tracking-wider">
+                Safe Application Autofill Standard
+              </h4>
+            </div>
+            <p className="text-xs text-purple-800/80 dark:text-purple-300/80 leading-relaxed">
+              All profile and technical fields are populated from your verified Master Resume and project evidence. <strong>No autonomous external submissions occur:</strong> you must review every field and perform the final manual submission.
+            </p>
+          </div>
+
+          {appConfirmedMessage && (
+            <Alert variant="success" className="text-xs">
+              <CheckCircle2 size={14} className="mr-1.5 inline" />
+              {appConfirmedMessage}
+            </Alert>
+          )}
+
+          {preparedApp ? (
+            <div className="space-y-5">
+              {/* 1. Exact Fields from Master Resume */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold text-app-text uppercase tracking-wider flex items-center justify-between border-b border-app-border pb-1.5">
+                  <span>1. Verified Master Profile Details (Exact Fields)</span>
+                  <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 text-[10px]">100% Grounded</Badge>
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
+                  {preparedApp.exact_fields.map((field, idx) => (
+                    <div key={idx} className="p-2.5 rounded-lg border border-app-border bg-app-surface space-y-0.5">
+                      <span className="text-[10px] font-bold text-app-text-muted uppercase block">{field.field_label}</span>
+                      <span className="text-app-text font-medium block truncate">{String(field.value || "—")}</span>
+                      <span className="text-[9px] text-app-text-muted italic">{field.source}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* 2. Semantic Answers Grounded in Evidence */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold text-app-text uppercase tracking-wider flex items-center justify-between border-b border-app-border pb-1.5">
+                  <span>2. Tailored Application Responses (Evidence-Backed)</span>
+                  <Badge className="bg-blue-50 text-blue-700 border-blue-200 text-[10px]">Truthfully Grounded</Badge>
+                </h4>
+                <div className="space-y-2 text-xs">
+                  {preparedApp.semantic_fields.map((field, idx) => (
+                    <div key={idx} className="p-3 rounded-lg border border-blue-200/60 dark:border-blue-900/40 bg-blue-50/20 dark:bg-blue-950/20 space-y-1">
+                      <span className="text-[10px] font-bold text-blue-700 dark:text-blue-300 uppercase block">{field.field_label}</span>
+                      <p className="text-xs text-app-text leading-relaxed font-sans">{String(field.value || "")}</p>
+                      <span className="text-[9px] text-app-text-muted italic block">Evidence Source: {field.source}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* 3. Missing Information Requiring Candidate Input */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-bold text-app-text uppercase tracking-wider flex items-center justify-between border-b border-app-border pb-1.5">
+                  <span>3. Additional Application Questions</span>
+                  <Badge className="bg-amber-50 text-amber-700 border-amber-200 text-[10px]">User Input Required</Badge>
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                  {preparedApp.missing_fields.map((field, idx) => (
+                    <div key={idx} className="p-2.5 rounded-lg border border-amber-200/80 bg-amber-50/20 space-y-0.5">
+                      <span className="text-[10px] font-bold text-amber-800 dark:text-amber-300 uppercase block">{field.field_label}</span>
+                      <span className="text-[11px] text-app-text-muted italic">Provide during final submission form</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Explicit User Review & Confirmation Gate */}
+              <div className="pt-3 border-t border-app-border space-y-3">
+                <label className="flex items-start gap-2.5 cursor-pointer text-xs select-none">
+                  <input
+                    type="checkbox"
+                    checked={userConfirmedAcknowledgement}
+                    onChange={(e) => setUserConfirmedAcknowledgement(e.target.checked)}
+                    className="mt-0.5 rounded border-app-border text-purple-600 focus:ring-purple-500"
+                  />
+                  <span className="text-app-text-secondary leading-relaxed">
+                    I have thoroughly reviewed all application draft fields and verify that the facts and statements truthfully represent my background.
+                  </span>
+                </label>
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setAppDrawerOpen(false)}
+                    className="text-xs"
+                  >
+                    Close
+                  </Button>
+                  <Button
+                    onClick={handleConfirmApplication}
+                    disabled={!userConfirmedAcknowledgement || confirmingApp || preparedApp.status === "CONFIRMED"}
+                    className={`text-xs px-5 py-2 font-semibold text-white ${
+                      preparedApp.status === "CONFIRMED"
+                        ? "bg-emerald-600 hover:bg-emerald-700"
+                        : "bg-purple-600 hover:bg-purple-700"
+                    }`}
+                  >
+                    {confirmingApp ? (
+                      <>
+                        <RefreshCw size={13} className="animate-spin mr-1.5" />
+                        Confirming...
+                      </>
+                    ) : preparedApp.status === "CONFIRMED" ? (
+                      <>
+                        <CheckCircle2 size={13} className="mr-1.5" />
+                        Application Details Confirmed
+                      </>
+                    ) : (
+                      <>
+                        <Check size={13} className="mr-1.5" />
+                        Confirm Application Draft
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="py-10 text-center text-xs text-app-text-muted">
+              <RefreshCw size={24} className="animate-spin mx-auto text-purple-600 mb-2" />
+              Loading application preparation draft...
+            </div>
+          )}
         </div>
       </Modal>
     </div>

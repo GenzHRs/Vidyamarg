@@ -232,12 +232,12 @@ class ResumeContextService:
         except Exception as rev_err:
             logger.warning(f"Failed to increment context revision for candidate {candidate_id}: {rev_err}")
 
-        # ── STEP 4: Recalculate dependent job matches ──
+        # ── STEP 4: Recalculate dependent job recommendations ──
         try:
-            from app.api.routers.job_agent import _auto_ensure_candidate_matches
-            _auto_ensure_candidate_matches(candidate_id, db)
+            from app.services.job_recommendation_engine import JobRecommendationEngine
+            JobRecommendationEngine.invalidate_and_recalculate(candidate_id, db)
         except Exception as e:
-            logger.warning(f"Failed auto job match recalculation after active resume update: {e}")
+            logger.warning(f"Failed job recommendation recalculation after active resume update: {e}")
 
         return target_resume, role_res
 

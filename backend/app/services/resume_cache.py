@@ -8,24 +8,44 @@ logger = logging.getLogger("app.resume_cache")
 # Local in-memory fallback
 _LOCAL_RESUME_CACHE = {}
 
+import time
+
 _redis = None
+_redis_checked_at = 0.0
+_redis_is_online = False
+_REDIS_RETRY_INTERVAL = 30.0
+
 def _get_redis():
-    global _redis
-    if _redis is None:
-        if settings.REDIS_URL:
-            try:
-                import redis
-                _redis = redis.Redis.from_url(
-                    settings.REDIS_URL,
-                    socket_connect_timeout=2,
-                    socket_timeout=2,
-                    decode_responses=True
-                )
-            except Exception as e:
-                logger.warning(f"Redis not available for resume cache: {e}")
-    return _redis
+    global _redis, _redis_checked_at, _redis_is_online
+    now = time.time()
+    if not settings.REDIS_URL:
+        return None
+    if _redis is not None and _redis_is_online:
+        return _redis
+    if not _redis_is_online and (now - _redis_checked_at) < _REDIS_RETRY_INTERVAL:
+        return None
+
+    _redis_checked_at = now
+    try:
+        import redis
+        client = redis.Redis.from_url(
+            settings.REDIS_URL,
+            socket_connect_timeout=0.2,
+            socket_timeout=0.5,
+            decode_responses=True
+        )
+        client.ping()
+        _redis = client
+        _redis_is_online = True
+        return _redis
+    except Exception as e:
+        _redis = None
+        _redis_is_online = False
+        logger.debug(f"Redis not available for resume cache (using in-memory fallback): {e}")
+        return None
 
 def get_cached_resume_analysis(candidate_id: int):
+    global _redis_is_online
     r = _get_redis()
     key = f"resume_analysis_cache:{candidate_id}"
     if r:
@@ -34,10 +54,12 @@ def get_cached_resume_analysis(candidate_id: int):
             if val:
                 return json.loads(val)
         except Exception as e:
-            logger.error(f"Redis cache error reading resume analysis for candidate {candidate_id}: {e}")
+            _redis_is_online = False
+            logger.debug(f"Redis cache error reading resume analysis for candidate {candidate_id}: {e}")
     return _LOCAL_RESUME_CACHE.get(candidate_id)
 
 def set_cached_resume_analysis(candidate_id: int, data: dict):
+    global _redis_is_online
     r = _get_redis()
     key = f"resume_analysis_cache:{candidate_id}"
     # TTL: 24 hours
@@ -47,20 +69,23 @@ def set_cached_resume_analysis(candidate_id: int, data: dict):
             r.setex(key, ttl, json.dumps(data))
             return
         except Exception as e:
-            logger.error(f"Redis cache error writing resume analysis for candidate {candidate_id}: {e}")
+            _redis_is_online = False
+            logger.debug(f"Redis cache error writing resume analysis for candidate {candidate_id}: {e}")
     try:
         _LOCAL_RESUME_CACHE[candidate_id] = json.loads(json.dumps(data))
     except Exception:
         _LOCAL_RESUME_CACHE[candidate_id] = data
 
 def invalidate_resume_analysis(candidate_id: int):
+    global _redis_is_online
     r = _get_redis()
     key = f"resume_analysis_cache:{candidate_id}"
     if r:
         try:
             r.delete(key)
         except Exception as e:
-            logger.error(f"Redis cache error deleting resume analysis for candidate {candidate_id}: {e}")
+            _redis_is_online = False
+            logger.debug(f"Redis cache error deleting resume analysis for candidate {candidate_id}: {e}")
     if candidate_id in _LOCAL_RESUME_CACHE:
         try:
             del _LOCAL_RESUME_CACHE[candidate_id]
@@ -76,6 +101,7 @@ _LOCAL_REVISIONS = {}
 
 def get_candidate_context_revision(candidate_id: int) -> int:
     """Returns the current monotonic context revision for a candidate (defaults to 1)."""
+    global _redis_is_online
     r = _get_redis()
     key = f"candidate:{candidate_id}:context_revision"
     if r:
@@ -84,11 +110,13 @@ def get_candidate_context_revision(candidate_id: int) -> int:
             if val is not None:
                 return int(val)
         except Exception as e:
-            logger.warning(f"Error reading context revision for candidate {candidate_id}: {e}")
+            _redis_is_online = False
+            logger.debug(f"Error reading context revision for candidate {candidate_id}: {e}")
     return _LOCAL_REVISIONS.get(candidate_id, 1)
 
 def increment_candidate_context_revision(candidate_id: int) -> int:
     """Increments and returns the context revision, immediately invalidating stale cache."""
+    global _redis_is_online
     r = _get_redis()
     key = f"candidate:{candidate_id}:context_revision"
     new_rev = 1
@@ -99,7 +127,8 @@ def increment_candidate_context_revision(candidate_id: int) -> int:
             r.delete(f"candidate:{candidate_id}:active_resume_context")
             r.delete(f"candidate:{candidate_id}:active_resume_id")
         except Exception as e:
-            logger.warning(f"Error incrementing context revision for candidate {candidate_id}: {e}")
+            _redis_is_online = False
+            logger.debug(f"Error incrementing context revision for candidate {candidate_id}: {e}")
             new_rev = _LOCAL_REVISIONS.get(candidate_id, 1) + 1
     else:
         new_rev = _LOCAL_REVISIONS.get(candidate_id, 1) + 1
@@ -114,6 +143,7 @@ def get_cached_active_resume_context(candidate_id: int) -> Optional[dict]:
     Returns cached active resume context ONLY if its revision matches the current revision.
     Guarantees stale cache is NEVER returned.
     """
+    global _redis_is_online
     current_rev = get_candidate_context_revision(candidate_id)
     r = _get_redis()
     key = f"candidate:{candidate_id}:active_resume_context"
@@ -125,7 +155,8 @@ def get_cached_active_resume_context(candidate_id: int) -> Optional[dict]:
             if val:
                 cached_obj = json.loads(val)
         except Exception as e:
-            logger.warning(f"Error reading cached active resume context for candidate {candidate_id}: {e}")
+            _redis_is_online = False
+            logger.debug(f"Error reading cached active resume context for candidate {candidate_id}: {e}")
 
     if not cached_obj:
         cached_obj = _LOCAL_CONTEXT_CACHE.get(candidate_id)
@@ -140,6 +171,7 @@ def get_cached_active_resume_context(candidate_id: int) -> Optional[dict]:
 
 def set_cached_active_resume_context(candidate_id: int, revision: int, data: dict):
     """Caches candidate active resume context stamped with its revision."""
+    global _redis_is_online
     r = _get_redis()
     key = f"candidate:{candidate_id}:active_resume_context"
     payload = {"revision": revision, "data": data}
@@ -150,9 +182,11 @@ def set_cached_active_resume_context(candidate_id: int, revision: int, data: dic
             r.set(f"candidate:{candidate_id}:active_resume_id", str(data.get("active_resume_id", "")))
             return
         except Exception as e:
-            logger.warning(f"Error writing active resume context cache for candidate {candidate_id}: {e}")
+            _redis_is_online = False
+            logger.debug(f"Error writing active resume context cache for candidate {candidate_id}: {e}")
 
     _LOCAL_CONTEXT_CACHE[candidate_id] = payload
+
 
 def invalidate_candidate_context(candidate_id: int):
     """Invalidates all cached candidate context across Redis and local memory."""

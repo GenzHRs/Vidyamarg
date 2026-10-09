@@ -21,6 +21,25 @@ const nextConfig: NextConfig = {
     ],
     minimumCacheTTL: 86400,  // 24h browser cache for optimized images
   },
+  async redirects() {
+    return [
+      {
+        source: "/auth/login",
+        destination: "/login",
+        permanent: false,
+      },
+      {
+        source: "/auth/signup",
+        destination: "/signup",
+        permanent: false,
+      },
+      {
+        source: "/auth/register",
+        destination: "/signup",
+        permanent: false,
+      },
+    ];
+  },
 };
 
 // Enable bundle analyzer if ANALYZE env is true

@@ -552,6 +552,21 @@ def render_structured_data_to_pdf(data: Dict[str, Any], title: str = "", templat
     story.append(Paragraph(html.escape(name), title_style))
     story.append(Spacer(1, 2))
 
+    prof_title = personal.get("professional_title")
+    if prof_title and str(prof_title).strip():
+        subtitle_style = ParagraphStyle(
+            'ResumeSubtitle',
+            parent=styles['Normal'],
+            fontSize=11,
+            leading=13.5,
+            fontName=font_bold,
+            alignment=align_title,
+            textColor=accent_color,
+            spaceAfter=3
+        )
+        story.append(Paragraph(html.escape(str(prof_title).strip()), subtitle_style))
+        story.append(Spacer(1, 2))
+
     contact_parts = []
     if personal.get("email"):
         contact_parts.append(html.escape(personal["email"]))
@@ -572,7 +587,8 @@ def render_structured_data_to_pdf(data: Dict[str, Any], title: str = "", templat
     story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e1"), spaceBefore=2, spaceAfter=5))
 
     # 2. Professional Summary
-    summary = data.get("summary") or data.get("professional_summary") or data.get("career_objective")
+    raw_summary = data.get("summary") or data.get("professional_summary") or data.get("career_objective")
+    summary = raw_summary.get("summary") if isinstance(raw_summary, dict) else str(raw_summary or "")
     if summary and summary.strip():
         story.append(Paragraph("PROFESSIONAL SUMMARY", section_style))
         story.append(Paragraph(html.escape(summary.strip()), body_style))

@@ -142,8 +142,8 @@ export default function CandidateProfile() {
   const summaryToDisplay = professionalObj.summary || profileData?.summary || "";
   const primaryDesignation = professionalObj.primary_designation || profileData?.primary_designation || "";
   
-  const targetRoles: string[] = parseList(professionalObj.target_roles || profileData?.target_roles);
-  const roleEvidence: string[] = parseList(professionalObj.role_evidence || profileData?.role_evidence);
+  const targetRoles: any[] = parseList(professionalObj.target_roles || profileData?.target_roles);
+  const roleEvidence: any[] = parseList(professionalObj.role_evidence || profileData?.role_evidence);
 
   const expList = parseList(profileData?.experience || profileData?.experience_list);
   const projList = parseList(profileData?.projects || profileData?.projects_list);
@@ -305,11 +305,14 @@ export default function CandidateProfile() {
                   <span>Target Job Roles</span>
                 </h3>
                 <div className="flex flex-wrap gap-2 pt-1">
-                  {targetRoles.map((role, rIdx) => (
-                    <span key={rIdx} className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-800/40">
-                      {role}
-                    </span>
-                  ))}
+                  {targetRoles.map((role, rIdx) => {
+                    const roleStr = typeof role === "object" ? (role?.role || JSON.stringify(role)) : String(role);
+                    return (
+                      <span key={rIdx} className="text-xs font-semibold px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-800/40">
+                        {roleStr}
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -408,13 +411,31 @@ export default function CandidateProfile() {
                 <h3 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider border-b border-gray-100 dark:border-gray-850 pb-2">
                   Role Qualification Evidence
                 </h3>
-                <ul className="space-y-1.5">
-                  {roleEvidence.map((ev, evIdx) => (
-                    <li key={evIdx} className="text-xs text-gray-600 dark:text-gray-300 flex items-start gap-2">
-                      <span className="text-indigo-500 font-bold">•</span>
-                      <span>{ev}</span>
-                    </li>
-                  ))}
+                <ul className="space-y-3">
+                  {roleEvidence.map((ev: any, evIdx: number) => {
+                    const roleName = typeof ev === "object" ? ev?.role : null;
+                    const rawEv = typeof ev === "object" ? ev?.evidence : ev;
+                    const evidenceList = Array.isArray(rawEv) ? rawEv : [rawEv];
+
+                    return (
+                      <li key={evIdx} className="text-xs text-gray-600 dark:text-gray-300 flex flex-col gap-1.5 pb-1">
+                        {roleName && (
+                          <span className="font-bold text-gray-900 dark:text-gray-100 flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 inline-block" />
+                            {roleName}
+                          </span>
+                        )}
+                        <div className="space-y-1 pl-3">
+                          {evidenceList.map((item: any, iIdx: number) => (
+                            <div key={iIdx} className="flex items-start gap-2">
+                              <span className="text-indigo-400 font-bold">•</span>
+                              <span>{typeof item === "string" ? item : (typeof item === "object" ? JSON.stringify(item) : String(item))}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </li>
+                    );
+                  })}
                 </ul>
               </div>
             )}
@@ -499,42 +520,55 @@ export default function CandidateProfile() {
                   <Code2 size={14} className="text-indigo-500" />
                   <span>Projects</span>
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 gap-6 w-full">
                   {projList.map((proj: any, idx: number) => {
                     const pName = proj.name || proj.project_name || "Project Name";
                     const pUrl = proj.url || proj.project_url || proj.link;
                     const pTechs = parseList(proj.technologies);
                     const pBullets = parseList(proj.responsibilities || proj.bullets);
+                    const pDates = proj.start_date || proj.end_date 
+                      ? `${proj.start_date || ""} ${proj.start_date && proj.end_date ? "-" : ""} ${proj.end_date || ""}`.trim()
+                      : (proj.date || proj.duration || "");
 
                     return (
-                      <div key={idx} className="p-4 rounded-2xl border border-gray-150 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/20 space-y-2 flex flex-col justify-between">
-                        <div className="space-y-1.5">
-                          <div className="flex justify-between items-start gap-3">
-                            <h5 className="text-xs font-bold text-gray-900 dark:text-white leading-snug">{pName}</h5>
+                      <div key={idx} className="w-full p-5 rounded-2xl border border-gray-150 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/20 space-y-3 flex flex-col justify-between">
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap justify-between items-center gap-3">
+                            <div className="flex items-center gap-2">
+                              <h5 className="text-sm font-bold text-gray-900 dark:text-white leading-snug">{pName}</h5>
+                              {pDates && (
+                                <span className="text-[11px] text-gray-400 font-normal">
+                                  • {pDates}
+                                </span>
+                              )}
+                            </div>
                             {pUrl && (
-                              <a href={pUrl} target="_blank" rel="noopener noreferrer" className="text-[10px] font-bold text-indigo-500 hover:underline flex items-center gap-1 cursor-pointer shrink-0">
+                              <a href={pUrl} target="_blank" rel="noopener noreferrer" className="text-xs font-bold text-indigo-500 hover:underline flex items-center gap-1 cursor-pointer shrink-0">
                                 <span>Link</span>
-                                <Globe size={10} />
+                                <Globe size={12} />
                               </a>
                             )}
                           </div>
                           {proj.description && (
-                            <p className="text-[11px] text-gray-500 leading-relaxed">
+                            <p className="text-xs text-gray-600 dark:text-gray-300 leading-relaxed">
                               {proj.description}
                             </p>
                           )}
                           {pBullets.length > 0 && (
-                            <ul className="space-y-1 text-[11px] text-gray-500">
-                              {pBullets.slice(0, 3).map((b: string, bIdx: number) => (
-                                <li key={bIdx}>• {b}</li>
+                            <ul className="space-y-1.5 text-xs text-gray-600 dark:text-gray-300">
+                              {pBullets.map((b: string, bIdx: number) => (
+                                <li key={bIdx} className="flex items-start gap-1.5">
+                                  <span className="text-gray-400">•</span>
+                                  <span>{b}</span>
+                                </li>
                               ))}
                             </ul>
                           )}
                         </div>
                         {pTechs.length > 0 && (
-                          <div className="flex flex-wrap gap-1 mt-2">
+                          <div className="flex flex-wrap gap-1.5 mt-2">
                             {pTechs.map((tech: string, tIdx: number) => (
-                              <span key={tIdx} className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-white dark:bg-background border border-gray-200 dark:border-gray-800 text-gray-500">
+                              <span key={tIdx} className="text-[10px] font-bold px-2 py-0.5 rounded bg-white dark:bg-background border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-400">
                                 {tech}
                               </span>
                             ))}

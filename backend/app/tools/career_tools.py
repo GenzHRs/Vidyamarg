@@ -368,15 +368,16 @@ tool_registry.register(AnalyzeResumeTool())
 
 class OptimizeResumeForJdArgs(BaseModel):
     job_description: str = Field(..., description="Full text or key requirements of the target job posting.")
-    job_title: str = Field("Target Role", description="Job title for optimization.")
-    company: str = Field("Target Company", description="Target company name.")
-    resume_id: Optional[int] = Field(None, description="Resume ID to optimize. Defaults to latest.")
+    resume_id: Optional[int] = Field(None, description="Resume ID to optimize. Defaults to active master resume.")
+    template_id: Optional[int] = Field(None, description="Template ID for rendering.")
+    job_title: Optional[str] = Field(None, description="Job title for optimization.")
+    company: Optional[str] = Field(None, description="Target company name.")
 
 class OptimizeResumeForJdTool(BaseAgentTool):
     @property
     def name(self) -> str: return "optimize_resume_for_jd"
     @property
-    def description(self) -> str: return "Tailors candidate resume specifically to a target job description without fabricating facts."
+    def description(self) -> str: return "Optimizes candidate master resume for a specific job description with 100% truthfulness and full ATS evidence matching."
     @property
     def args_schema(self) -> Type[BaseModel]: return OptimizeResumeForJdArgs
 
@@ -386,34 +387,100 @@ class OptimizeResumeForJdTool(BaseAgentTool):
             return {"error": "Candidate not found"}
 
         from app.services.active_resume_rag_service import ActiveResumeRAGService
+        from app.services.ats_optimizer import run_full_jd_optimization
+        from app.models.resume_center_models import ResumeOptimization, ResumeOptimizationEvidence, JobDescription
+
         if args.resume_id:
             resume = db.query(Resume).filter(Resume.candidate_id == cand.id, Resume.id == args.resume_id, Resume.deleted_at == None).first()
-            version = db.query(ResumeVersion).filter(ResumeVersion.id == resume.current_version_id).first() if resume else None
+            version = db.query(ResumeVersion).filter(ResumeVersion.resume_id == resume.id).order_by(ResumeVersion.version_number.desc()).first() if resume else None
             data = version.structured_data if (version and version.structured_data) else {}
         else:
             resume, version, data = ActiveResumeRAGService.get_active_resume(db, cand.id)
             data = data or {}
 
-        if not resume:
-            return {"error": "No source resume found"}
+        if not resume or not data:
+            return {"error": "No source master resume found"}
 
-        analysis = generate_jd_tailored_resume(
-            source_resume_id=resume.id,
-            source_resume_data=data,
+        opt_result = run_full_jd_optimization(
+            master_resume_data=data,
+            job_description_text=args.job_description,
             job_title=args.job_title,
-            company_name=args.company,
-            job_description=args.job_description
+            company=args.company
         )
 
+        # Store in DB
+        prior_opts_count = db.query(ResumeOptimization).filter(
+            ResumeOptimization.master_resume_id == resume.id,
+            ResumeOptimization.candidate_id == cand.id
+        ).count()
+
+        opt_record = ResumeOptimization(
+            candidate_id=cand.id,
+            master_resume_id=resume.id,
+            template_id=args.template_id,
+            optimization_version=prior_opts_count + 1,
+            ats_score=opt_result.ats_scores.overall_ats_score,
+            keyword_score=opt_result.ats_scores.keyword_match,
+            experience_score=opt_result.ats_scores.experience_match,
+            technical_score=opt_result.ats_scores.technical_match,
+            responsibility_score=opt_result.ats_scores.responsibility_match,
+            alignment_score=opt_result.ats_scores.alignment_score,
+            quality_score=opt_result.ats_scores.quality_score,
+            truthfulness_score=opt_result.truthfulness_score,
+            job_title=opt_result.job_title,
+            company=opt_result.company,
+            optimized_data=opt_result.optimized_resume,
+            matched_skills=opt_result.ats_scores.matched_skills,
+            partial_matches=opt_result.ats_scores.partial_matches,
+            missing_skills=opt_result.ats_scores.missing_skills,
+            recommendations=opt_result.ats_scores.recommendations,
+            ats_report=opt_result.ats_scores.model_dump()
+        )
+        db.add(opt_record)
+        db.flush()
+
+        for ev in opt_result.evidence_matches:
+            db.add(ResumeOptimizationEvidence(
+                optimization_id=opt_record.id,
+                jd_requirement=ev.jd_requirement,
+                candidate_evidence=ev.candidate_evidence,
+                match_type=ev.match_type,
+                confidence=ev.confidence,
+                category=ev.category
+            ))
+
+        db.commit()
+        db.refresh(opt_record)
+
+        evidence_map = [
+            {
+                "requirement": ev.jd_requirement,
+                "evidence": ev.candidate_evidence,
+                "strength": ev.match_type
+            }
+            for ev in opt_result.evidence_matches
+        ]
+
         return {
-            "source_resume_id": resume.id,
-            "target_role": args.job_title,
-            "company": args.company,
-            "matching_skills": analysis.matching_skills,
-            "missing_requirements": analysis.missing_requirements,
-            "suggested_changes": [c.model_dump() for c in analysis.suggested_changes],
-            "tailored_summary": analysis.final_resume_data.get("summary", ""),
-            "warnings": analysis.warnings
+            "optimization_id": opt_record.id,
+            "job_title": opt_record.job_title,
+            "dynamic_title": opt_record.job_title,
+            "ats_score": opt_record.ats_score,
+            "resume_match_score": opt_result.resume_match_score,
+            "keyword_match": opt_record.keyword_score,
+            "experience_match": opt_record.experience_score,
+            "technical_match": opt_record.technical_score,
+            "truthfulness_score": opt_record.truthfulness_score,
+            "score_breakdown": opt_result.score_breakdown,
+            "score_explanation": opt_result.score_explanation.model_dump(),
+            "skill_gaps": opt_result.skill_gaps.model_dump(),
+            "application_readiness": opt_result.application_readiness.model_dump(),
+            "prepared_application": opt_result.prepared_application.model_dump(),
+            "optimized_resume": opt_record.optimized_data,
+            "evidence_map": evidence_map,
+            "matched_skills": opt_record.matched_skills,
+            "missing_skills": opt_record.missing_skills,
+            "recommendations": opt_record.recommendations
         }
 
 tool_registry.register(OptimizeResumeForJdTool())
@@ -567,8 +634,8 @@ class GetRecommendedJobsTool(BaseAgentTool):
                         "company": job.company_name,
                         "location": job.location,
                         "match_score": score_pct,
-                        "matched_skills": (m.breakdown or {}).get("matched_skills", []),
-                        "missing_skills": (m.breakdown or {}).get("missing_skills", []),
+                        "matched_skills": getattr(m, "match_reasons", []) or [],
+                        "missing_skills": getattr(m, "missing_skills", []) or [],
                         "apply_url": job.apply_url or f"/candidate/jobs?id={job.id}"
                     })
 

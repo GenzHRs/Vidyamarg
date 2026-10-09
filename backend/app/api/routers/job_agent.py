@@ -66,6 +66,7 @@ class ApplicationCreateRequest(BaseModel):
     notes: Optional[str] = None
     cover_letter: Optional[str] = None
     applied_via: Optional[str] = None
+    optimization_id: Optional[int] = None
 
 
 class ApplicationUpdateRequest(BaseModel):
@@ -74,6 +75,7 @@ class ApplicationUpdateRequest(BaseModel):
     interview_notes: Optional[str] = None
     offer_salary: Optional[float] = None
     rejection_reason: Optional[str] = None
+    optimization_id: Optional[int] = None
 
 
 class PreferencesUpdateRequest(BaseModel):
@@ -337,58 +339,13 @@ class IngestRequest(BaseModel):
 def _auto_ensure_candidate_matches(candidate_id: int, db: Session):
     """
     Ensures active jobs exist in the database and have corresponding Match entries
-    for the candidate scored against their active resume skills.
+    for the candidate scored strictly against their active resume target roles and skills.
     """
     try:
-        active_jobs = db.query(Job).filter(Job.is_active == True).all()
-        if not active_jobs:
-            return
-
-        active_job_ids = {j.id for j in active_jobs}
-        matched_jobs = db.query(Match.job_id).filter(Match.candidate_id == candidate_id).all()
-        matched_job_ids = {m[0] for m in matched_jobs}
-
-        unmatched_ids = active_job_ids - matched_job_ids
-        if unmatched_ids:
-            from app.services.active_resume_rag_service import ActiveResumeRAGService
-            profile_data = ActiveResumeRAGService.get_exact_profile(db, candidate_id)
-            cand_skills = set([s.lower() for s in profile_data.get("all_skills", []) if s])
-            if not cand_skills:
-                cand = db.query(Candidate).filter(Candidate.id == candidate_id).first()
-                cand_skills = set([s.strip().lower() for s in (cand.skills or "").split(",") if s.strip()]) if cand else set()
-
-            new_matches = []
-            for jid in unmatched_ids:
-                job_obj = next((j for j in active_jobs if j.id == jid), None)
-                req_skills = [s.lower() for s in (job_obj.required_skills or [])] if job_obj else []
-                matching_skills = [s for s in req_skills if s in cand_skills]
-                
-                if req_skills and cand_skills:
-                    score = round((len(matching_skills) / len(req_skills)) * 100.0, 1)
-                    reasons = [f"Matches skills: {', '.join([s for s in job_obj.required_skills if s.lower() in cand_skills][:3])}"] if matching_skills else ["Role domain match"]
-                else:
-                    score = None
-                    reasons = ["Match unavailable — Upload an active resume to view match score."]
-
-                missing_skills = [s for s in (job_obj.required_skills or []) if s.lower() not in cand_skills]
-
-                new_matches.append(
-                    Match(
-                        candidate_id=candidate_id,
-                        job_id=jid,
-                        overall_score=score,
-                        skill_score=score,
-                        experience_score=score,
-                        location_score=85.0 if score is not None else None,
-                        match_reasons=reasons,
-                        missing_skills=missing_skills[:3],
-                        status="new",
-                    )
-                )
-            db.bulk_save_objects(new_matches)
-            db.commit()
+        from app.services.job_recommendation_engine import JobRecommendationEngine
+        JobRecommendationEngine.get_recommended_jobs(db, candidate_id, persist_matches=True)
     except Exception as e:
-        logger.warning(f"Auto-matching active jobs failed: {e}")
+        logger.warning(f"Auto-matching active jobs via JobRecommendationEngine failed: {e}")
         db.rollback()
 
 
@@ -562,6 +519,20 @@ def get_dashboard(
     }
 
 
+@router.get("/recommended")
+def get_job_agent_recommended_jobs(
+    limit: int = Query(50, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    STRICT TARGET-ROLE & SKILL-BASED JOB RECOMMENDATIONS
+    """
+    candidate = _get_candidate(current_user, db)
+    from app.services.job_recommendation_engine import JobRecommendationEngine
+    return JobRecommendationEngine.get_recommended_jobs(db, candidate.id, limit=limit)
+
+
 @router.get("/jobs")
 def get_job_feed(
     page: int = Query(1, ge=1),
@@ -570,6 +541,10 @@ def get_job_feed(
     seniority: Optional[str] = Query(None),
     is_remote: Optional[bool] = Query(None),
     status_filter: Optional[str] = Query(None),
+    target_role: Optional[str] = Query(None),
+    target_role_only: Optional[bool] = Query(None),
+    recommended: Optional[bool] = Query(None),
+    recommended_only: Optional[bool] = Query(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -579,16 +554,39 @@ def get_job_feed(
     # Automatically generate default matches for any active jobs in DB that don't have a Match row for this candidate yet
     _auto_ensure_candidate_matches(candidate.id, db)
 
+    if recommended or recommended_only:
+        from app.services.job_recommendation_engine import JobRecommendationEngine
+        rec_data = JobRecommendationEngine.get_recommended_jobs(db, candidate.id, limit=page_size)
+        return {
+            "total": rec_data["total"],
+            "page": 1,
+            "page_size": page_size,
+            "total_pages": 1,
+            "jobs": rec_data["jobs"],
+            "candidate_context": rec_data["candidate_context"],
+        }
+
     query = (
         db.query(Match, Job)
         .join(Job, Match.job_id == Job.id)
         .filter(
             Match.candidate_id == candidate.id,
             Match.is_hidden == False,
-            Match.overall_score >= min_score,
             Job.is_active == True,
         )
     )
+
+    if min_score > 0.0:
+        query = query.filter(Match.overall_score >= min_score)
+    elif target_role_only:
+        query = query.filter(Match.overall_score >= 50.0)
+
+    if target_role and target_role.strip():
+        role_search = target_role.strip()
+        query = query.filter(
+            (Job.title.ilike(f"%{role_search}%")) |
+            (Job.role_category.ilike(f"%{role_search}%"))
+        )
 
     if is_remote is not None:
         query = query.filter(Job.is_remote == is_remote)
@@ -754,6 +752,7 @@ def get_applications(
             "is_remote": job.is_remote,
             "apply_url": job.apply_url,
             "applied_via": app.applied_via,
+            "optimization_id": app.optimization_id,
             "notes": app.notes,
             "interview_rounds": app.interview_rounds,
             "offer_salary": app.offer_salary,
@@ -800,12 +799,14 @@ def create_application(
             existing.notes = request.notes
         if request.cover_letter:
             existing.cover_letter = request.cover_letter
+        if request.optimization_id:
+            existing.optimization_id = request.optimization_id
         if request.status == "applied" and not existing.applied_at:
             existing.applied_at = now
         existing.updated_at = now
         db.commit()
         db.refresh(existing)
-        return {"id": existing.id, "status": existing.status, "message": "Application updated"}
+        return {"id": existing.id, "status": existing.status, "optimization_id": existing.optimization_id, "message": "Application updated"}
 
     # Create new
     match = db.query(Match).filter(
@@ -821,6 +822,7 @@ def create_application(
         match_id=match.id if match else None,
         status=request.status,
         resume_version_id=resume_ver_id,
+        optimization_id=request.optimization_id,
         notes=request.notes,
         cover_letter=request.cover_letter,
         applied_via=request.applied_via,
@@ -910,11 +912,13 @@ def update_application(
         app.offer_salary = request.offer_salary
     if request.rejection_reason is not None:
         app.rejection_reason = request.rejection_reason
+    if request.optimization_id is not None:
+        app.optimization_id = request.optimization_id
 
     app.updated_at = now
     db.commit()
 
-    return {"id": app.id, "status": app.status, "message": "Application updated"}
+    return {"id": app.id, "status": app.status, "optimization_id": app.optimization_id, "message": "Application updated"}
 
 
 @router.get("/career-paths")
@@ -994,11 +998,32 @@ async def get_interview_prep(
             "company_name": job.company_name,
         }
 
+    # Check if application exists for this job to resolve submitted/prepared revision provenance
+    app = db.query(Application).filter(
+        Application.candidate_id == candidate.id,
+        Application.job_id == job_id
+    ).first()
+
+    resume_source_label = "Active Master Profile"
+    applied_opt_id = None
+    if app and app.optimization_id:
+        applied_opt = db.query(ResumeOptimization).filter(ResumeOptimization.id == app.optimization_id).first()
+        if applied_opt:
+            applied_opt_id = applied_opt.id
+            if applied_opt.is_submitted:
+                resume_source_label = f"Confirmed Submitted Resume (v{applied_opt.optimization_version})"
+            elif applied_opt.candidate_approved:
+                resume_source_label = f"Candidate-Approved Prepared Resume (v{applied_opt.optimization_version})"
+            else:
+                resume_source_label = f"Prepared Draft Resume (v{applied_opt.optimization_version})"
+
     return {
         "status": "ready",
         "job_id": job_id,
         "job_title": job.title,
         "company_name": job.company_name,
+        "resume_source": resume_source_label,
+        "optimization_id": applied_opt_id,
         "company_analysis": prep.company_analysis or {},
         "technical_questions": prep.technical_questions or [],
         "hr_questions": prep.hr_questions or [],
